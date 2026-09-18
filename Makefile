@@ -4,13 +4,13 @@
 #   make          оба, если nvcc найден, иначе только cpu
 
 CXX      ?= c++
-CXXFLAGS ?= -O2 -std=c++17 -Wall -Wextra -Iinclude
+CXXFLAGS ?= -O2 -std=c++17 -Wall -Wextra -Iinclude -pthread
 
 NVCC     ?= nvcc
 # Должна соответствовать карте, иначе драйвер каждый запуск JIT-компилирует из PTX, и измеряется не тот код, что собран.
 # sm_70 Volta, sm_75 Turing, sm_80 A100, sm_86 Ampere GeForce, sm_89 Ada, sm_90 Hopper.
 GPU_ARCH ?= sm_70
-NVCCFLAGS ?= -O3 -std=c++17 -Iinclude --generate-code arch=compute_$(subst sm_,,$(GPU_ARCH)),code=$(GPU_ARCH)
+NVCCFLAGS ?= -O3 -std=c++17 -Iinclude -Xcompiler -pthread --generate-code arch=compute_$(subst sm_,,$(GPU_ARCH)),code=$(GPU_ARCH)
 
 BIN      := bin
 HAVE_NVCC := $(shell command -v $(NVCC) 2>/dev/null)

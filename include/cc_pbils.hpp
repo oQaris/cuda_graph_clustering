@@ -12,6 +12,10 @@
 //
 // Начальная популяция случайна и намеренно не оптимизируется локальным поиском сразу — как и в
 // бейзлайне.
+//
+// Слоты внутри одной итерации независимы: каждый читает общую популяцию и пишет только свою ячейку
+// следующей. Это и есть ось параллелизма — на GPU слот получает блок, на CPU его берёт поток из
+// пула (--threads). Ответ от числа потоков не зависит: каждый слот несёт свой поток ГПСЧ.
 #pragma once
 
 #include <cstdint>
@@ -33,6 +37,7 @@ struct PbilsParams {
   int iterations = 100;
   int early_stop = 6;
   double perturbation = 0.4;     // вероятность перемаркировки вершины
+  int threads = 1;               // только CPU-бэкенд: сколько особей популяции считать сразу
   uint64_t seed = 1;
   double time_limit_sec = 0.0;   // 0 отключает лимит
   bool verbose = false;
@@ -80,7 +85,17 @@ long long LocalSearch(const Graph& graph, State& state, long long* accepted_move
 
 // Перемаркирует каждую вершину с вероятностью probability в равновероятно выбранный другой
 // кластер, затем пересчитывает инкрементальные данные.
-void Perturb(const Graph& graph, State& state, double probability, uint64_t& rng);
+//
+// Поток ГПСЧ у каждой вершины свой и выводится из (seed, slot, vertex, iteration), а не берётся из
+// общего последовательного состояния: только так результат не зависит от того, в каком порядке и
+// сколькими потоками считались особи. Схема вывода сидов совпадает с KernelPerturb, поэтому CPU и
+// GPU при одном --seed идут одной траекторией.
+void Perturb(const Graph& graph, State& state, double probability, uint64_t seed, int slot,
+             int iteration);
+
+// Число рабочих потоков, которое реально будет использовано: params.threads <= 0 означает "по
+// числу ядер", и больше одного потока на особь не нужно.
+int ResolveThreads(const PbilsParams& params);
 
 PbilsResult SolveCpu(const Graph& graph, const PbilsParams& params);
 

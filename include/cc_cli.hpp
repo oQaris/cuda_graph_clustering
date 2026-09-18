@@ -55,6 +55,8 @@ inline void PrintUsage(const char* program) {
       "  --early-stop E        остановиться после E итераций без рекорда (по умолчанию 6)\n"
       "  --perturb Q           вероятность перемаркировки вершины (по умолчанию 0.4)\n"
       "  --seed S              сид поиска (по умолчанию 1)\n"
+      "  --threads T           только CPU: сколько особей популяции считать сразу,\n"
+      "                        0 - по числу ядер (по умолчанию 1)\n"
       "  --time-limit T        лимит времени в секундах, 0 отключает (по умолчанию 0)\n"
       "  --ls-kernel WHERE     только GPU: auto (по умолчанию), shared или global -\n"
       "                        где хранится состояние решения во время локального поиска\n"
@@ -124,6 +126,9 @@ inline bool Parse(int argc, char** argv, Options& options) {
     } else if (!std::strcmp(flag, "--seed")) {
       if (!NeedsValue(flag, i, argc)) return false;
       options.params.seed = std::strtoull(value(), nullptr, 10);
+    } else if (!std::strcmp(flag, "--threads")) {
+      if (!NeedsValue(flag, i, argc)) return false;
+      options.params.threads = std::atoi(value());
     } else if (!std::strcmp(flag, "--time-limit")) {
       if (!NeedsValue(flag, i, argc)) return false;
       options.params.time_limit_sec = std::strtod(value(), nullptr);
@@ -183,6 +188,8 @@ inline void WriteResultJson(const std::string& path, const Graph& graph, const O
   out << "  \"density\": " << graph.Density() << ",\n";
   out << "  \"k\": " << options.params.k << ",\n";
   out << "  \"population\": " << options.params.population << ",\n";
+  // Число потоков есть часть условий замера, поэтому попадает в результат.
+  if (!std::strcmp(backend, "cpu")) out << "  \"threads\": " << ResolveThreads(options.params) << ",\n";
   out << "  \"runs\": " << options.runs << ",\n";
   out << "  \"objective function value\": " << best.objective << ",\n";
   out << "  \"objective average\": " << avg_objective << ",\n";
@@ -221,6 +228,9 @@ inline int Main(int argc, char** argv, const char* backend, SolverFn solve) {
   std::printf("algorithm    PBILS  k=%d  pop=%d  tournament=%d  iters=%d  early-stop=%d  perturb=%.2f\n",
               options.params.k, options.params.population, options.params.tournament,
               options.params.iterations, options.params.early_stop, options.params.perturbation);
+  // Печатается реально используемое число потоков: --threads 0 означает "по числу ядер", и больше
+  // одного потока на особь всё равно не берётся.
+  if (!std::strcmp(backend, "cpu")) std::printf("threads      %d\n", ResolveThreads(options.params));
 
   PbilsResult best;
   double objective_sum = 0.0;
