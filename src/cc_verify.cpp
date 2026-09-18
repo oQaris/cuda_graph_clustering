@@ -1,7 +1,7 @@
-// Correctness checks for the incremental objective machinery. The formula
+// Проверки корректности инкрементальной целевой функции. Формула
 //   f = m + sum_c C(n_c,2) - 2W
-// and the move delta are shared with the CUDA kernels, so proving them here
-// proves the arithmetic the GPU relies on.
+// и дельта хода общие с ядрами CUDA, поэтому доказательство здесь доказывает
+// и арифметику, на которую опирается GPU.
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -13,8 +13,8 @@
 
 namespace {
 
-// Temporary files must land somewhere that exists on every target: /tmp is
-// absent on Windows, so honour the platform's own temp variables.
+// Временные файлы должны попадать туда, что существует на любой платформе:
+// /tmp нет в Windows, поэтому используем собственные переменные окружения.
 std::string TempPath(const char* name) {
   for (const char* variable : {"TMPDIR", "TEMP", "TMP"}) {
     if (const char* dir = std::getenv(variable)) {
@@ -45,7 +45,7 @@ void CheckEq(long long got, long long want, const std::string& what) {
   }
 }
 
-// 1. The closed-form objective must equal the pairwise count, for arbitrary k.
+// 1. Замкнутая формула целевой функции должна совпадать с попарным подсчётом при любом k.
 void TestObjectiveMatchesDefinition() {
   std::printf("objective formula vs pairwise definition\n");
   uint64_t rng = 12345;
@@ -67,7 +67,7 @@ void TestObjectiveMatchesDefinition() {
   }
 }
 
-// 2. G, sizes and f must survive a long chain of incremental moves.
+// 2. G, sizes и f должны оставаться точными после длинной цепочки инкрементальных ходов.
 void TestIncrementalMovesStayExact() {
   std::printf("incremental move updates stay exact\n");
   uint64_t rng = 999;
@@ -104,7 +104,7 @@ void TestIncrementalMovesStayExact() {
   }
 }
 
-// 3. Local search must decrease f strictly and stop at a real local optimum.
+// 3. Локальный поиск должен строго уменьшать f и останавливаться в настоящем локальном оптимуме.
 void TestLocalSearchDescends() {
   std::printf("local search descends to a local optimum\n");
   uint64_t rng = 777;
@@ -130,11 +130,11 @@ void TestLocalSearchDescends() {
   }
 }
 
-// 4. Instances whose optimum is known by hand.
+// 4. Инстансы, оптимум которых известен заранее, вручную.
 void TestKnownOptima() {
   std::printf("hand-checked instances\n");
 
-  // A complete graph is already a single cluster: zero disagreements.
+  // Полный граф — уже один кластер: разногласий нет.
   for (const unsigned n : {2u, 6u, 33u}) {
     const cc::Graph graph = cc::Graph::ErdosRenyi(n, 1.0, 1);
     cc::State state;
@@ -149,8 +149,8 @@ void TestKnownOptima() {
     CheckEq(cc::CountClustersUsed(state.labels, 3), 1, "K" + std::to_string(n) + " uses one cluster");
   }
 
-  // An edgeless graph on 4 vertices with k = 2: the best split is 2 + 2, whose
-  // cost is C(2,2) + C(2,2) = 2.
+  // Граф без рёбер на 4 вершинах при k = 2: лучшее разбиение 2 + 2, его
+  // стоимость C(2,2) + C(2,2) = 2.
   {
     const cc::Graph graph(4);
     cc::State state;
@@ -162,7 +162,7 @@ void TestKnownOptima() {
     CheckEq(state.f, 2, "empty graph, k=2 optimum");
   }
 
-  // Two disjoint triangles: k=2 separates them at zero cost.
+  // Два непересекающихся треугольника: k=2 разделяет их бесплатно.
   {
     cc::Graph graph(6);
     graph.AddEdge(0, 1); graph.AddEdge(1, 2); graph.AddEdge(0, 2);
@@ -175,7 +175,7 @@ void TestKnownOptima() {
     CheckEq(state.f, 0, "two triangles, k=2");
   }
 
-  // Single vertex: nothing to disagree about.
+  // Одна вершина: разногласий не бывает.
   {
     const cc::Graph graph(1);
     cc::State state;
@@ -186,7 +186,7 @@ void TestKnownOptima() {
   }
 }
 
-// 5. Graph IO must round-trip, including the baseline's JSON layout.
+// 5. Ввод-вывод графа должен быть обратим, включая формат JSON бейзлайна.
 void TestGraphIo() {
   std::printf("graph IO round trip\n");
   const cc::Graph graph = cc::Graph::ErdosRenyi(37, 0.4, 2024);
@@ -221,7 +221,7 @@ void TestGraphIo() {
   std::remove(json_path.c_str());
 }
 
-// 6. The solver must return a labelling whose reported value is the real one.
+// 6. Решатель должен возвращать разметку, чьё заявленное значение — настоящее.
 void TestSolverReportsTruth() {
   std::printf("solver result is self-consistent\n");
   const cc::Graph graph = cc::Graph::ErdosRenyi(120, 0.5, 4242);
@@ -239,12 +239,12 @@ void TestSolverReportsTruth() {
   }
 }
 
-// 7. Raising k must never make the reachable optimum worse: with the same seed a
-//    larger cluster budget is a superset of the smaller one's search space.
+// 7. Увеличение k не должно ухудшать достижимый оптимум: при том же сиде больший бюджет кластеров
+//    лишь расширяет пространство поиска.
 void TestMoreClustersDoNotHurt() {
   std::printf("edgeless graph: optimum follows the balanced split\n");
-  // For an edgeless graph the objective is exactly sum_c C(n_c,2), minimised by
-  // the most balanced split, which is a closed form we can compare against.
+  // Для графа без рёбер целевая функция — ровно sum_c C(n_c,2), минимум даёт самое сбалансированное
+  // разбиение; с ним и сравниваем в замкнутой форме.
   for (const unsigned n : {6u, 9u, 12u}) {
     for (const int k : {2, 3, 4}) {
       const cc::Graph graph(n);

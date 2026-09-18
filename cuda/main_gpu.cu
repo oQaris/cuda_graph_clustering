@@ -1,4 +1,4 @@
-// CUDA runner. Identical CLI to the CPU binary.
+// Раннер CUDA. CLI идентичен CPU-бинарнику.
 #include "cc_cli.hpp"
 #include "cc_gpu.hpp"
 

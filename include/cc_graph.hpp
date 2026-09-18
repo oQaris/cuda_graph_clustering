@@ -1,10 +1,9 @@
-// Undirected unweighted graph stored as a bit-packed adjacency matrix.
+// Неориентированный невзвешенный граф в виде битовой матрицы смежности.
 //
-// Rows are padded to whole 32-bit words so that a row can be intersected with a
-// cluster mask and counted with popcount. That is the bit-parallel form of the
-// matrix product A*Z: for an unweighted graph it moves 32 pair comparisons into
-// a single instruction, which is where the speed-up over the pairwise CPU loop
-// comes from.
+// Строки дополнены до целого числа 32-битных слов, чтобы пересекать строку с маской кластера и
+// считать совпадения через popcount. Это и есть битовая форма произведения A*Z: для невзвешенного
+// графа она сводит 32 попарных сравнения к одной инструкции — именно отсюда ускорение
+// относительно попарного цикла на CPU.
 #pragma once
 
 #include <cstdint>
@@ -25,7 +24,7 @@ class Graph {
   unsigned WordsPerRow() const { return words_per_row_; }
   uint64_t EdgeCount() const { return edges_; }
   const std::vector<Word>& Bits() const { return bits_; }
-  const Word* Row(unsigned v) const { return bits_.data() + static_cast<size_t>(v) * words_per_row_; }
+  const Word* Row(unsigned v) const { return bits_.data() + (size_t)v * words_per_row_; }
 
   bool IsJoined(unsigned i, unsigned j) const {
     return (Row(i)[j / kWordBits] >> (j % kWordBits)) & 1u;
@@ -34,18 +33,18 @@ class Graph {
   void AddEdge(unsigned i, unsigned j);
   double Density() const;
 
-  // G(n, p) with a fixed seed, so the very same instance can be handed to the
-  // CPU baseline and to the GPU solver.
+  // G(n, p) с фиксированным сидом — один и тот же инстанс можно отдать и CPU-референсу, и
+  // GPU-решателю.
   static Graph ErdosRenyi(unsigned n, double density, uint64_t seed);
 
-  // Plain text: first line "n", then n rows of n characters '0'/'1' or of
-  // whitespace-separated 0/1 values.
+  // Простой текст: первая строка — n, затем n строк из n символов '0'/'1' либо из значений 0/1
+  // через пробел.
   static Graph LoadMatrix(const std::string& path);
   void SaveMatrix(const std::string& path) const;
 
-  // The "graph": [[0,1,...],...] block that the CPU baseline
-  // (BIGADIL/graph_correlation_clustering) writes into every result file. Reading
-  // it lets us score the exact instances the baseline was run on.
+  // Блок "graph": [[0,1,...],...], который бейзлайн (BIGADIL/graph_correlation_clustering) пишет
+  // в каждый файл результата. Чтение этого блока позволяет посчитать целевую функцию на тех же
+  // инстансах, на которых гонялся бейзлайн.
   static Graph LoadBaselineJson(const std::string& path);
   void SaveBaselineJson(const std::string& path) const;
 

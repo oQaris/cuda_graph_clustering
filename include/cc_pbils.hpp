@@ -1,17 +1,17 @@
-// PBILS - population based iterated local search - for non-strict
-// k-correlation clustering, plus the solution state it operates on.
+// PBILS (population based iterated local search) для нестрогой k-корреляционной кластеризации и
+// состояние решения, над которым он работает.
 //
-// One iteration, following the CPU baseline (BIGADIL/graph_correlation_clustering,
-// class IPLSAlgorithm) so that the GPU port stays comparable to it:
+// Одна итерация повторяет бейзлайн (BIGADIL/graph_correlation_clustering, класс IPLSAlgorithm),
+// чтобы GPU-порт оставался с ним сравним:
 //
-//   for every slot of the population:
-//     tournament selection from the current population
-//     local search down to a local optimum   -> candidate for the record
-//     random perturbation of that local optimum -> member of the next population
-//   stop when the record has not improved for `early_stop` iterations
+//   для каждого слота популяции:
+//     турнирная селекция из текущей популяции
+//     локальный поиск до локального оптимума  -> кандидат в рекорд
+//     случайное возмущение этого оптимума      -> член следующей популяции
+//   останов — когда рекорд не улучшался early_stop итераций подряд
 //
-// The initial population is random and is deliberately not locally optimised,
-// again matching the baseline.
+// Начальная популяция случайна и намеренно не оптимизируется локальным поиском сразу — как и в
+// бейзлайне.
 #pragma once
 
 #include <cstdint>
@@ -22,21 +22,21 @@
 namespace cc {
 
 struct PbilsParams {
-  // Where the GPU backend keeps the solution state during a local search.
-  // Both kernels implement the same steepest descent and return the same
-  // answer; shared memory is far faster but bounded by its capacity.
+  // Где GPU-бэкенд хранит состояние решения во время локального поиска. Оба ядра реализуют один
+  // и тот же наискорейший спуск и дают один ответ; разделяемая память намного быстрее, но
+  // ограничена по объёму.
   enum LocalSearchKernel { kLocalSearchAuto = 0, kLocalSearchGlobal = 1, kLocalSearchShared = 2 };
 
-  int k = 2;                     // upper bound on clusters (non-strict)
+  int k = 2;                     // верхняя граница числа кластеров (нестрого)
   int population = 128;
   int tournament = 5;
   int iterations = 100;
   int early_stop = 6;
-  double perturbation = 0.4;     // per-vertex relabel probability
+  double perturbation = 0.4;     // вероятность перемаркировки вершины
   uint64_t seed = 1;
-  double time_limit_sec = 0.0;   // 0 disables the limit
+  double time_limit_sec = 0.0;   // 0 отключает лимит
   bool verbose = false;
-  int ls_kernel = kLocalSearchAuto;  // GPU backend only; ignored on the CPU
+  int ls_kernel = kLocalSearchAuto;  // только GPU-бэкенд, на CPU игнорируется
 };
 
 struct PbilsResult {
@@ -49,37 +49,37 @@ struct PbilsResult {
   long long accepted_moves = 0;
 };
 
-// The objective straight from its definition, pair by pair: O(n^2). Mirrors the
-// baseline's GetDistanceToGraph and serves as ground truth for every fast path.
+// Целевая функция напрямую из определения, по парам: O(n^2). Соответствует GetDistanceToGraph
+// бейзлайна и служит эталоном для всех быстрых путей.
 long long ObjectiveDirect(const Graph& graph, const std::vector<int>& labels);
 
 int CountClustersUsed(const std::vector<int>& labels, int k);
 
-// A solution together with the data that makes a move O(1) to evaluate:
-// G (= A*Z, cluster-major) and the cluster sizes.
+// Решение вместе с данными, делающими оценку хода O(1): G (= A*Z, по кластерам) и размеры
+// кластеров.
 struct State {
   int n = 0;
   int k = 0;
-  std::vector<int> labels;   // n entries, values in [0, k)
-  std::vector<int> g;        // k * n entries, g[c * n + v] = |N(v) inside c|
-  std::vector<int> sizes;    // k entries
+  std::vector<int> labels;   // n элементов, значения из [0, k)
+  std::vector<int> g;        // k * n элементов, g[c * n + v] = |N(v) в кластере c|
+  std::vector<int> sizes;    // k элементов
   long long f = 0;
 
   void Init(int vertices, int clusters);
-  // Recomputes g, sizes and f from labels. Bit-parallel: intersects each
-  // adjacency row with each cluster mask and counts with popcount.
+  // Пересчитывает g, sizes и f по labels. Битовый параллелизм: строка смежности пересекается с
+  // маской каждого кластера и считается через popcount.
   void Rebuild(const Graph& graph);
-  // Steepest-descent candidate. Returns the delta (< 0 when improving) and
-  // writes the move into out_v / out_to.
+  // Кандидат наискорейшего спуска. Возвращает дельту (< 0 — улучшение) и записывает ход в
+  // out_v / out_to.
   int BestMove(int& out_v, int& out_to) const;
   void ApplyMove(const Graph& graph, int v, int to);
 };
 
-// Runs strictly improving single-vertex moves until no move improves f.
+// Выполняет строго улучшающие одиночные ходы, пока такие остаются.
 long long LocalSearch(const Graph& graph, State& state, long long* accepted_moves = nullptr);
 
-// Relabels every vertex with probability `probability` to a uniformly chosen
-// different cluster, then rebuilds the incremental data.
+// Перемаркирует каждую вершину с вероятностью probability в равновероятно выбранный другой
+// кластер, затем пересчитывает инкрементальные данные.
 void Perturb(const Graph& graph, State& state, double probability, uint64_t& rng);
 
 PbilsResult SolveCpu(const Graph& graph, const PbilsParams& params);

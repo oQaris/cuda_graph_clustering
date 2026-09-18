@@ -1,5 +1,5 @@
-// Command line front-end shared by the CPU and the CUDA binaries, so both are
-// driven identically and their numbers are directly comparable.
+// Общий интерфейс командной строки для CPU- и CUDA-бинарников: оба запускаются одинаково, и их
+// числа напрямую сравнимы.
 #pragma once
 
 #include <chrono>
@@ -17,7 +17,7 @@ namespace cc {
 namespace cli {
 
 struct Options {
-  // instance
+  // инстанс
   unsigned n = 500;
   double density = 0.5;
   uint64_t graph_seed = 1;
@@ -25,9 +25,9 @@ struct Options {
   std::string graph_json_path;
   std::string save_graph_path;
   std::string save_graph_json_path;
-  // algorithm
+  // алгоритм
   PbilsParams params;
-  // experiment
+  // эксперимент
   int runs = 1;
   bool verify = true;
   std::string out_path;
@@ -38,33 +38,33 @@ inline void PrintUsage(const char* program) {
   std::printf(
       "usage: %s [options]\n"
       "\n"
-      "instance\n"
-      "  --n N                 generate G(n,p) with N vertices (default 500)\n"
-      "  --density P           edge probability (default 0.5)\n"
-      "  --graph-seed S        seed of the generator, fixes the instance (default 1)\n"
-      "  --graph PATH          load a plain matrix instead of generating\n"
-      "  --graph-json PATH     load the \"graph\" block of a baseline result file\n"
-      "  --save-graph PATH     write the instance as a plain matrix\n"
-      "  --save-graph-json PATH  write the instance in the baseline's JSON layout\n"
+      "инстанс\n"
+      "  --n N                 сгенерировать G(n,p) на N вершинах (по умолчанию 500)\n"
+      "  --density P           вероятность ребра (по умолчанию 0.5)\n"
+      "  --graph-seed S        сид генератора, фиксирует инстанс (по умолчанию 1)\n"
+      "  --graph PATH          загрузить матрицу вместо генерации\n"
+      "  --graph-json PATH     загрузить блок \"graph\" из файла результата бейзлайна\n"
+      "  --save-graph PATH     сохранить инстанс как обычную матрицу\n"
+      "  --save-graph-json PATH  сохранить инстанс в формате JSON бейзлайна\n"
       "\n"
-      "algorithm\n"
-      "  --k K                 upper bound on the number of clusters (default 2)\n"
-      "  --pop P               population size (default 128)\n"
-      "  --tournament T        tournament size (default 5)\n"
-      "  --iters I             iteration cap (default 100)\n"
-      "  --early-stop E        stop after E iterations without a record (default 6)\n"
-      "  --perturb Q           per-vertex relabel probability (default 0.4)\n"
-      "  --seed S              seed of the search (default 1)\n"
-      "  --time-limit T        wall clock limit in seconds, 0 disables (default 0)\n"
-      "  --ls-kernel WHERE     GPU only: auto (default), shared or global - where the\n"
-      "                        solution state lives during a local search\n"
+      "алгоритм\n"
+      "  --k K                 верхняя граница числа кластеров (по умолчанию 2)\n"
+      "  --pop P               размер популяции (по умолчанию 128)\n"
+      "  --tournament T        размер турнира (по умолчанию 5)\n"
+      "  --iters I             предел числа итераций (по умолчанию 100)\n"
+      "  --early-stop E        остановиться после E итераций без рекорда (по умолчанию 6)\n"
+      "  --perturb Q           вероятность перемаркировки вершины (по умолчанию 0.4)\n"
+      "  --seed S              сид поиска (по умолчанию 1)\n"
+      "  --time-limit T        лимит времени в секундах, 0 отключает (по умолчанию 0)\n"
+      "  --ls-kernel WHERE     только GPU: auto (по умолчанию), shared или global -\n"
+      "                        где хранится состояние решения во время локального поиска\n"
       "\n"
-      "experiment\n"
-      "  --runs R              independent runs, reports min/avg/max (default 1)\n"
-      "  --no-verify           skip the O(n^2) recount of the reported objective\n"
-      "  --out PATH            write the result as JSON\n"
-      "  --labels-out PATH     write the best clustering as plain labels\n"
-      "  --verbose             print per-iteration progress\n",
+      "эксперимент\n"
+      "  --runs R              независимых прогонов, печатает min/avg/max (по умолчанию 1)\n"
+      "  --no-verify           пропустить пересчёт целевой функции за O(n^2)\n"
+      "  --out PATH            сохранить результат в JSON\n"
+      "  --labels-out PATH     сохранить лучшую кластеризацию как метки\n"
+      "  --verbose             печатать прогресс по итерациям\n",
       program);
 }
 
@@ -84,7 +84,7 @@ inline bool Parse(int argc, char** argv, Options& options) {
       return false;
     } else if (!std::strcmp(flag, "--n")) {
       if (!NeedsValue(flag, i, argc)) return false;
-      options.n = static_cast<unsigned>(std::strtoul(value(), nullptr, 10));
+      options.n = (unsigned)std::strtoul(value(), nullptr, 10);
     } else if (!std::strcmp(flag, "--density")) {
       if (!NeedsValue(flag, i, argc)) return false;
       options.density = std::strtod(value(), nullptr);
@@ -168,9 +168,8 @@ inline Graph LoadInstance(const Options& options) {
   return Graph::ErdosRenyi(options.n, options.density, options.graph_seed);
 }
 
-inline void WriteResultJson(const std::string& path, const Graph& graph,
-                            const Options& options, const PbilsResult& best,
-                            const char* backend, double avg_objective,
+inline void WriteResultJson(const std::string& path, const Graph& graph, const Options& options,
+                            const PbilsResult& best, const char* backend, double avg_objective,
                             long long worst_objective, double avg_seconds) {
   std::ofstream out(path);
   if (!out) {
@@ -218,11 +217,10 @@ inline int Main(int argc, char** argv, const char* backend, SolverFn solve) {
 
   std::printf("backend      %s\n", backend);
   std::printf("instance     n=%u  edges=%llu  density=%.4f\n", graph.Size(),
-              static_cast<unsigned long long>(graph.EdgeCount()), graph.Density());
+              (unsigned long long)graph.EdgeCount(), graph.Density());
   std::printf("algorithm    PBILS  k=%d  pop=%d  tournament=%d  iters=%d  early-stop=%d  perturb=%.2f\n",
               options.params.k, options.params.population, options.params.tournament,
-              options.params.iterations, options.params.early_stop,
-              options.params.perturbation);
+              options.params.iterations, options.params.early_stop, options.params.perturbation);
 
   PbilsResult best;
   double objective_sum = 0.0;
@@ -231,7 +229,7 @@ inline int Main(int argc, char** argv, const char* backend, SolverFn solve) {
 
   for (int run = 0; run < options.runs; ++run) {
     PbilsParams params = options.params;
-    params.seed = options.params.seed + static_cast<uint64_t>(run);
+    params.seed = options.params.seed + (uint64_t)run;
 
     PbilsResult result;
     try {
@@ -249,13 +247,13 @@ inline int Main(int argc, char** argv, const char* backend, SolverFn solve) {
       }
     }
 
-    objective_sum += static_cast<double>(result.objective);
+    objective_sum += (double)result.objective;
     seconds_sum += result.seconds;
     if (run == 0 || result.objective < best.objective) best = result;
     if (run == 0 || result.objective > worst) worst = result.objective;
 
-    std::printf("run %-3d      f=%-10lld  clusters=%-3d  iters=%-4d  %.3fs\n", run,
-                result.objective, result.clusters_used, result.iterations_done, result.seconds);
+    std::printf("run %-3d      f=%-10lld  clusters=%-3d  iters=%-4d  %.3fs\n", run, result.objective,
+                result.clusters_used, result.iterations_done, result.seconds);
   }
 
   const double avg_objective = objective_sum / options.runs;

@@ -18,6 +18,7 @@ double SecondsSince(const std::chrono::steady_clock::time_point& start) {
 
 }  // namespace
 
+// Прямой подсчёт по определению, за O(n^2): эталон для проверки быстрых путей.
 long long ObjectiveDirect(const Graph& graph, const std::vector<int>& labels) {
   const unsigned n = graph.Size();
   if (labels.size() != n) throw std::runtime_error("labels length != graph size");
@@ -46,49 +47,52 @@ void State::Init(int vertices, int clusters) {
   n = vertices;
   k = clusters;
   labels.assign(n, 0);
-  g.assign(static_cast<size_t>(k) * n, 0);
+  g.assign((size_t)k * n, 0);
   sizes.assign(k, 0);
   f = 0;
 }
 
+// Пересчитывает G, размеры кластеров и f по labels.
 void State::Rebuild(const Graph& graph) {
   const unsigned words = graph.WordsPerRow();
 
   sizes.assign(k, 0);
   for (int v = 0; v < n; ++v) ++sizes[labels[v]];
 
-  std::vector<Word> masks(static_cast<size_t>(k) * words, 0u);
+  std::vector<Word> masks((size_t)k * words, 0u);
   for (int v = 0; v < n; ++v) {
-    masks[static_cast<size_t>(labels[v]) * words + v / kWordBits] |= (1u << (v % kWordBits));
+    masks[(size_t)labels[v] * words + v / kWordBits] |= (1u << (v % kWordBits));
   }
 
-  g.assign(static_cast<size_t>(k) * n, 0);
+  g.assign((size_t)k * n, 0);
   long long intra_twice = 0;
   for (int v = 0; v < n; ++v) {
     const Word* row = graph.Row(v);
     for (int c = 0; c < k; ++c) {
-      const Word* mask = masks.data() + static_cast<size_t>(c) * words;
+      const Word* mask = masks.data() + (size_t)c * words;
       int acc = 0;
       for (unsigned w = 0; w < words; ++w) acc += PopCount(row[w] & mask[w]);
-      g[static_cast<size_t>(c) * n + v] = acc;
+      g[(size_t)c * n + v] = acc;
     }
-    intra_twice += g[static_cast<size_t>(labels[v]) * n + v];
+    intra_twice += g[(size_t)labels[v] * n + v];
   }
 
-  f = Objective(static_cast<long long>(graph.EdgeCount()), sizes.data(), k, intra_twice / 2);
+  f = Objective((long long)graph.EdgeCount(), sizes.data(), k, intra_twice / 2);
 }
 
+// Индекс g[(size_t)c * n + v] считается на месте намеренно: вынос указателей строк G в отдельный
+// массив выглядит ускорением, но добавляет косвенность и на замере оказался ~10% медленнее.
 int State::BestMove(int& out_v, int& out_to) const {
   int best = 0;
   out_v = -1;
   out_to = -1;
   for (int v = 0; v < n; ++v) {
     const int from = labels[v];
-    const int g_from = g[static_cast<size_t>(from) * n + v];
+    const int g_from = g[(size_t)from * n + v];
     const int size_from = sizes[from];
     for (int to = 0; to < k; ++to) {
       if (to == from) continue;
-      const int delta = MoveDelta(size_from, sizes[to], g_from, g[static_cast<size_t>(to) * n + v]);
+      const int delta = MoveDelta(size_from, sizes[to], g_from, g[(size_t)to * n + v]);
       if (delta < best) {
         best = delta;
         out_v = v;
@@ -103,12 +107,10 @@ void State::ApplyMove(const Graph& graph, int v, int to) {
   const int from = labels[v];
   if (from == to) return;
 
-  const int delta = MoveDelta(sizes[from], sizes[to],
-                              g[static_cast<size_t>(from) * n + v],
-                              g[static_cast<size_t>(to) * n + v]);
+  const int delta = MoveDelta(sizes[from], sizes[to], g[(size_t)from * n + v], g[(size_t)to * n + v]);
 
-  int* g_from = g.data() + static_cast<size_t>(from) * n;
-  int* g_to = g.data() + static_cast<size_t>(to) * n;
+  int* g_from = g.data() + (size_t)from * n;
+  int* g_to = g.data() + (size_t)to * n;
   const Word* row = graph.Row(v);
   const unsigned words = graph.WordsPerRow();
   for (unsigned w = 0; w < words; ++w) {
@@ -127,6 +129,7 @@ void State::ApplyMove(const Graph& graph, int v, int to) {
   f += delta;
 }
 
+// Наискорейший спуск: пока есть улучшающий ход, применяем его.
 long long LocalSearch(const Graph& graph, State& state, long long* accepted_moves) {
   int v = -1;
   int to = -1;
@@ -139,11 +142,11 @@ long long LocalSearch(const Graph& graph, State& state, long long* accepted_move
 
 void Perturb(const Graph& graph, State& state, double probability, uint64_t& rng) {
   if (state.k < 2) return;
-  const float threshold = static_cast<float>(probability);
+  const float threshold = (float)probability;
   bool touched = false;
   for (int v = 0; v < state.n; ++v) {
     if (RandFloat(rng) >= threshold) continue;
-    const int shift = 1 + static_cast<int>(RandBelow(rng, static_cast<unsigned>(state.k - 1)));
+    const int shift = 1 + (int)RandBelow(rng, state.k - 1);
     state.labels[v] = (state.labels[v] + shift) % state.k;
     touched = true;
   }
@@ -155,7 +158,7 @@ PbilsResult SolveCpu(const Graph& graph, const PbilsParams& params) {
   if (params.population < 1) throw std::runtime_error("population must be >= 1");
 
   const auto started = std::chrono::steady_clock::now();
-  const int n = static_cast<int>(graph.Size());
+  const int n = (int)graph.Size();
   const int size = params.population;
 
   std::vector<State> population(size);
@@ -165,7 +168,7 @@ PbilsResult SolveCpu(const Graph& graph, const PbilsParams& params) {
   for (int i = 0; i < size; ++i) {
     population[i].Init(n, params.k);
     for (int v = 0; v < n; ++v) {
-      population[i].labels[v] = static_cast<int>(RandBelow(rng, static_cast<unsigned>(params.k)));
+      population[i].labels[v] = RandBelow(rng, params.k);
     }
     population[i].Rebuild(graph);
     next[i].Init(n, params.k);
@@ -185,9 +188,9 @@ PbilsResult SolveCpu(const Graph& graph, const PbilsParams& params) {
   for (int iteration = 0; iteration < params.iterations; ++iteration) {
     bool improved = false;
     for (int slot = 0; slot < size; ++slot) {
-      int chosen = static_cast<int>(RandBelow(rng, static_cast<unsigned>(size)));
+      int chosen = RandBelow(rng, size);
       for (int t = 1; t < params.tournament; ++t) {
-        const int candidate = static_cast<int>(RandBelow(rng, static_cast<unsigned>(size)));
+        const int candidate = RandBelow(rng, size);
         if (population[candidate].f < population[chosen].f) chosen = candidate;
       }
 
@@ -210,8 +213,8 @@ PbilsResult SolveCpu(const Graph& graph, const PbilsParams& params) {
     stall = improved ? 0 : stall + 1;
 
     if (params.verbose) {
-      std::printf("  iter %3d  record %lld  stall %d  %.2fs\n", iteration + 1,
-                  result.objective, stall, SecondsSince(started));
+      std::printf("  iter %3d  record %lld  stall %d  %.2fs\n", iteration + 1, result.objective, stall,
+                  SecondsSince(started));
     }
     if (stall >= params.early_stop) break;
     if (params.time_limit_sec > 0.0 && SecondsSince(started) >= params.time_limit_sec) break;

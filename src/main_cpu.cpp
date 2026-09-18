@@ -1,5 +1,5 @@
-// CPU reference runner. Same CLI as the CUDA binary, so the two can be compared
-// on identical instances and identical parameters.
+// Раннер CPU-референса. CLI совпадает с CUDA-бинарником, поэтому оба сравнимы на одинаковых
+// инстансах и параметрах.
 #include "cc_cli.hpp"
 
 int main(int argc, char** argv) {

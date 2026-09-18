@@ -13,20 +13,20 @@ namespace cc {
 Graph::Graph(unsigned n) : n_(n) {
   words_per_row_ = (n + kWordBits - 1) / kWordBits;
   if (words_per_row_ == 0) words_per_row_ = 1;
-  bits_.assign(static_cast<size_t>(n_) * words_per_row_, 0u);
+  bits_.assign((size_t)n_ * words_per_row_, 0u);
 }
 
 void Graph::AddEdge(unsigned i, unsigned j) {
   if (i == j) return;
   if (IsJoined(i, j)) return;
-  bits_[static_cast<size_t>(i) * words_per_row_ + j / kWordBits] |= (1u << (j % kWordBits));
-  bits_[static_cast<size_t>(j) * words_per_row_ + i / kWordBits] |= (1u << (i % kWordBits));
+  bits_[(size_t)i * words_per_row_ + j / kWordBits] |= (1u << (j % kWordBits));
+  bits_[(size_t)j * words_per_row_ + i / kWordBits] |= (1u << (i % kWordBits));
   ++edges_;
 }
 
 double Graph::Density() const {
-  const double pairs = static_cast<double>(n_) * (n_ - 1) / 2.0;
-  return pairs > 0 ? static_cast<double>(edges_) / pairs : 0.0;
+  const double pairs = (double)n_ * (n_ - 1) / 2.0;
+  return pairs > 0 ? (double)edges_ / pairs : 0.0;
 }
 
 Graph Graph::ErdosRenyi(unsigned n, double density, uint64_t seed) {
@@ -50,7 +50,7 @@ Graph Graph::LoadMatrix(const std::string& path) {
   for (unsigned i = 0; i < n; ++i) {
     for (unsigned j = 0; j < n; ++j) {
       int value = 0;
-      // Accepts both "0 1 0" and "010" layouts.
+      // Принимает и раскладку "0 1 0", и "010".
       int ch = in.get();
       while (ch != EOF && std::isspace(ch)) ch = in.get();
       if (ch == EOF) throw std::runtime_error("truncated matrix in " + path);
@@ -74,9 +74,9 @@ void Graph::SaveMatrix(const std::string& path) const {
   }
 }
 
-// Scans for the "graph" key and reads the bracketed 0/1 matrix that follows.
-// Deliberately a scanner rather than a JSON parser: the baseline result files
-// embed the whole matrix plus unrelated fields, and we only need this one block.
+// Ищет ключ "graph" и читает следующую за ним матрицу 0/1 в скобках. Намеренно сканер, а не
+// JSON-парсер: файлы результатов бейзлайна несут всю матрицу вперемешку с посторонними полями, а
+// нужен только этот блок.
 Graph Graph::LoadBaselineJson(const std::string& path) {
   std::ifstream in(path);
   if (!in) throw std::runtime_error("cannot open json file: " + path);
@@ -107,7 +107,7 @@ Graph Graph::LoadBaselineJson(const std::string& path) {
   }
   if (rows.empty()) throw std::runtime_error("empty \"graph\" block in " + path);
 
-  const unsigned n = static_cast<unsigned>(rows.size());
+  const unsigned n = (unsigned)rows.size();
   Graph g(n);
   for (unsigned i = 0; i < n; ++i) {
     if (rows[i].size() != n) {

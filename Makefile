@@ -1,15 +1,14 @@
-# Two independent build paths:
-#   make cpu      host reference + tests, plain C++17, no CUDA needed
-#   make gpu      CUDA solver (needs nvcc)
-#   make          both if nvcc is present, otherwise just cpu
+# Два независимых пути сборки:
+#   make cpu      CPU-референс + тесты, обычный C++17, CUDA не нужна
+#   make gpu      решатель на CUDA (нужен nvcc)
+#   make          оба, если nvcc найден, иначе только cpu
 
 CXX      ?= c++
 CXXFLAGS ?= -O2 -std=c++17 -Wall -Wextra -Iinclude
 
 NVCC     ?= nvcc
-# Must match the card, otherwise the driver JIT-compiles from PTX at every start
-# and the measured code is not the code you built. sm_70 Volta, sm_75 Turing,
-# sm_80 A100, sm_86 Ampere GeForce, sm_89 Ada, sm_90 Hopper.
+# Должна соответствовать карте, иначе драйвер каждый запуск JIT-компилирует из PTX, и измеряется не тот код, что собран.
+# sm_70 Volta, sm_75 Turing, sm_80 A100, sm_86 Ampere GeForce, sm_89 Ada, sm_90 Hopper.
 GPU_ARCH ?= sm_70
 NVCCFLAGS ?= -O3 -std=c++17 -Iinclude --generate-code arch=compute_$(subst sm_,,$(GPU_ARCH)),code=$(GPU_ARCH)
 
