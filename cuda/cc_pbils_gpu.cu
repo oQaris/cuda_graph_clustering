@@ -33,6 +33,10 @@ constexpr int kBlockSize = 256;
 using Gain = short;
 constexpr int kMaxVerticesForGain = 32767;
 
+// Ход в KernelLocalSearch упакован в 31 бит: вершина << 12 | откуда << 6 | куда.
+static_assert(kMaxClusters <= 64, "cluster index must fit in 6 bits of the packed move");
+static_assert(kMaxVerticesForGain < (1 << 19), "vertex index must fit in 19 bits of the packed move");
+
 #define CC_CUDA_CHECK(call)                                                                    \
   do {                                                                                          \
     const cudaError_t status = (call);                                                          \
@@ -118,14 +122,29 @@ __global__ void KernelRebuild(const uint32_t* __restrict__ bits, int words, int 
 //                    signed char, а не int: это экономит n*3 байта разделяемой памяти, от чего
 //                    напрямую зависит, какие инстансы в неё вообще влезают.
 // kShared — компилируемая константа, поэтому if constexpr выбрасывает неиспользуемую ветку ещё
-// на этапе компиляции, и обе версии остаются такими же по коду, как были раздельными функциями.
-// Оба варианта реализуют один и тот же спуск с одинаковым разрешением ничьих и обязаны приходить
-// к одинаковому f — это и проверяется тестами.
-template <bool kShared>
-__global__ void KernelLocalSearch(const uint32_t* __restrict__ bits, int words, int n, int k,
-                                  int* labels, Gain* g, int* sizes, long long* f,
-                                  unsigned long long* accepted_moves) {
+// на этапе компиляции. Оба варианта реализуют один и тот же спуск с одинаковым разрешением ничьих
+// и обязаны приходить к одинаковому f — это и проверяется тестами.
+//
+// На ход приходится один __syncthreads, и держится это на двух вещах:
+//   * поток владеет вершинами v = tid (mod kThreads) и в скане, и в правке G, поэтому читает и
+//     пишет только свои элементы G и меток, и барьер после применения хода не нужен;
+//   * наилучший ход сворачивается __shfl внутри варпа, а итог по варпам каждый поток досчитывает
+//     сам. Буфер варпов двойной: запись в него на ходе i + 2 возможна только после барьера хода
+//     i + 1, а к нему все потоки приходят, уже дочитав ход i.
+// Размеры кластеров лежат в том же двойном режиме. В скане хода i буфер i & 1 хранит размеры до
+// хода i - 1, а поправку за сам ход i - 1 каждый поток прибавляет из регистров. После барьера хода i
+// этот буфер уже дочитан, и его сразу доводят до размеров после хода i. Держать размеры в массиве
+// на поток нельзя: он уходит в локальную память (256 байт стека, проверяйте -Xptxas -v), и при
+// k >= 16 и популяции 1024 ядро замедляется на десятки процентов.
+// Ход упакован в 64-битный ключ (дельта, вершина, откуда, куда), и минимум ключа даёт то же
+// разрешение ничьих, что и CPU: меньшая дельта, затем меньшая вершина, затем меньший кластер.
+template <bool kShared, int kThreads>
+__global__ void __launch_bounds__(kThreads)
+KernelLocalSearch(const uint32_t* __restrict__ bits, int words, int n, int k, int* labels, Gain* g,
+                  int* sizes, long long* f, unsigned long long* accepted_moves) {
   using Label = typename std::conditional<kShared, signed char, int>::type;
+  constexpr int kWarps = kThreads / 32;
+  static_assert(kThreads % 32 == 0, "block must be whole warps");
 
   const int sol = blockIdx.x;
   const int tid = threadIdx.x;
@@ -134,15 +153,7 @@ __global__ void KernelLocalSearch(const uint32_t* __restrict__ bits, int words, 
   Gain* my_g = g + (size_t)sol * k * n;
   int* my_sizes = sizes + (size_t)sol * k;
 
-  __shared__ int cluster_size[kMaxClusters];
-  __shared__ int best_delta[kBlockSize];
-  __shared__ int best_vertex[kBlockSize];
-  __shared__ int best_target[kBlockSize];
-  __shared__ int move_vertex;
-  __shared__ int move_from;
-  __shared__ int move_to;
-  __shared__ int move_delta;
-  __shared__ long long objective;
+  __shared__ long long warp_best[2][kWarps];
 
   Gain* wg;   // рабочее G текущего решения
   Label* wl;  // рабочие метки текущего решения
@@ -150,102 +161,135 @@ __global__ void KernelLocalSearch(const uint32_t* __restrict__ bits, int words, 
     extern __shared__ unsigned char dynamic_shared[];
     Gain* sg = reinterpret_cast<Gain*>(dynamic_shared);            // k * n элементов
     Label* slabel = reinterpret_cast<Label*>(sg + (size_t)k * n);  // n элементов
-    for (int i = tid; i < k * n; i += kBlockSize) sg[i] = my_g[i];
-    for (int v = tid; v < n; v += kBlockSize) slabel[v] = (Label)my_labels[v];
+    // Копирование идёт по той же схеме владения, что и спуск, поэтому барьер после него не нужен.
+    for (int c = 0; c < k; ++c) {
+      for (int v = tid; v < n; v += kThreads) sg[(size_t)c * n + v] = my_g[(size_t)c * n + v];
+    }
+    for (int v = tid; v < n; v += kThreads) slabel[v] = (Label)my_labels[v];
     wg = sg;
     wl = slabel;
   } else {
     wg = my_g;
     wl = my_labels;
   }
-  for (int c = tid; c < k; c += kBlockSize) cluster_size[c] = my_sizes[c];
-  if (tid == 0) objective = f[sol];
+  __shared__ int cluster_size[2][kMaxClusters];
+  for (int c = tid; c < k; c += kThreads) cluster_size[0][c] = cluster_size[1][c] = my_sizes[c];
   __syncthreads();
+  long long objective = f[sol];
 
+  // "Хода нет": дельта 0 и максимальная нагрузка, больше любого улучшающего ключа.
+  constexpr long long kNoMove = 0x7fffffffLL;
   unsigned long long applied = 0;
+  int parity = 0;
+  int prev_from = -1;  // последний применённый ход, ещё не учтённый в буфере parity
+  int prev_to = -1;
   while (true) {
+    const int* sizes_now = cluster_size[parity];
+    auto size_of = [&](int c) { return sizes_now[c] + (c == prev_to) - (c == prev_from); };
+
     int local_delta = 0;
     int local_vertex = -1;
-    int local_target = -1;
+    int local_from = 0;
+    int local_target = 0;
 
-    for (int v = tid; v < n; v += kBlockSize) {
+    for (int v = tid; v < n; v += kThreads) {
       const int from = wl[v];
-      const int size_from = cluster_size[from];
+      const int size_from = size_of(from);
       const int g_from = wg[from * n + v];
       for (int c = 0; c < k; ++c) {
         if (c == from) continue;
-        const int delta = MoveDelta(size_from, cluster_size[c], g_from, wg[c * n + v]);
+        const int delta = MoveDelta(size_from, size_of(c), g_from, wg[c * n + v]);
         if (delta < local_delta) {
           local_delta = delta;
           local_vertex = v;
+          local_from = from;
           local_target = c;
         }
       }
     }
 
-    best_delta[tid] = local_delta;
-    best_vertex[tid] = local_vertex;
-    best_target[tid] = local_target;
+    long long key = kNoMove;
+    if (local_vertex >= 0) {
+      key = (long long)local_delta * 4294967296LL +
+            (long long)((local_vertex << 12) | (local_from << 6) | local_target);
+    }
+    for (int offset = 16; offset > 0; offset >>= 1) {
+      const long long other = __shfl_down_sync(0xffffffffu, key, offset);
+      if (other < key) key = other;
+    }
+    if ((tid & 31) == 0) warp_best[parity][tid >> 5] = key;
     __syncthreads();
 
-    // Редукция к наилучшему ходу; ничья разрешается в пользу меньшего индекса вершины, чтобы
-    // прогон был воспроизводим и оба варианта шли одной траекторией.
-    for (int stride = kBlockSize / 2; stride > 0; stride >>= 1) {
-      if (tid < stride) {
-        const int other = tid + stride;
-        const bool better = best_delta[other] < best_delta[tid] ||
-                            (best_delta[other] == best_delta[tid] && best_vertex[other] >= 0 &&
-                             (best_vertex[tid] < 0 || best_vertex[other] < best_vertex[tid]));
-        if (better) {
-          best_delta[tid] = best_delta[other];
-          best_vertex[tid] = best_vertex[other];
-          best_target[tid] = best_target[other];
-        }
-      }
-      __syncthreads();
+    long long best = warp_best[parity][0];
+    for (int w = 1; w < kWarps; ++w) {
+      const long long other = warp_best[parity][w];
+      if (other < best) best = other;
     }
+    if (best >= 0) break;  // улучшающих ходов не осталось
 
-    if (best_delta[0] >= 0 || best_vertex[0] < 0) break;
+    const int delta = (int)(best >> 32);
+    const int payload = (int)(best & 0xffffffffLL);
+    const int v = payload >> 12;
+    const int from = (payload >> 6) & 63;
+    const int to = payload & 63;
 
-    if (tid == 0) {
-      move_vertex = best_vertex[0];
-      move_to = best_target[0];
-      move_delta = best_delta[0];
-      move_from = wl[move_vertex];
+    // Буфер parity дочитан всеми (они прошли барьер): доводим его до размеров после этого хода.
+    for (int c = tid; c < k; c += kThreads) {
+      cluster_size[parity][c] += (c == prev_to) - (c == prev_from) + (c == to) - (c == from);
     }
-    __syncthreads();
+    prev_from = from;
+    prev_to = to;
+    parity ^= 1;
 
-    const int v = move_vertex;
-    const int from = move_from;
-    const int to = move_to;
-    const uint32_t* row = bits + v * words;
+    const uint32_t* row = bits + (size_t)v * words;
     Gain* g_from = wg + from * n;
     Gain* g_to = wg + to * n;
-    for (int u = tid; u < n; u += kBlockSize) {
+    for (int u = tid; u < n; u += kThreads) {
       if ((row[u >> 5] >> (u & 31)) & 1u) {
         g_from[u] -= 1;
         g_to[u] += 1;
       }
     }
-
-    if (tid == 0) {
-      wl[v] = (Label)to;
-      cluster_size[from] -= 1;
-      cluster_size[to] += 1;
-      objective += move_delta;
-    }
-    __syncthreads();
+    if (v % kThreads == tid) wl[v] = (Label)to;
+    objective += delta;
     ++applied;
   }
 
   if constexpr (kShared) {
-    for (int i = tid; i < k * n; i += kBlockSize) my_g[i] = wg[i];
-    for (int v = tid; v < n; v += kBlockSize) my_labels[v] = wl[v];
+    for (int c = 0; c < k; ++c) {
+      for (int v = tid; v < n; v += kThreads) my_g[(size_t)c * n + v] = wg[(size_t)c * n + v];
+    }
+    for (int v = tid; v < n; v += kThreads) my_labels[v] = wl[v];
   }
-  for (int c = tid; c < k; c += kBlockSize) my_sizes[c] = cluster_size[c];
+  // После break буфер parity никто больше не пишет: к нему остаётся прибавить последний ход.
+  for (int c = tid; c < k; c += kThreads) {
+    my_sizes[c] = cluster_size[parity][c] + (c == prev_to) - (c == prev_from);
+  }
   if (tid == 0) {
     f[sol] = objective;
     if (accepted_moves != nullptr) atomicAdd(accepted_moves, applied);
+  }
+}
+
+// Потоков на блок локального поиска. Правило снято замером на RTX 4070 Ti SUPER (66 SM), сетка
+// n = 500..16000, k = 3 и 8, популяция 64..4096. Пока блоков мало, карта недогружена, и больший блок
+// быстрее — до 1,95x при популяции 64. Когда популяция уже заполняет SM, а работы на особь мало
+// (k*n < 10000), выгоднее 256: у 512 потоков остаётся по несколько вершин на поток, и ход съедает
+// синхронизация — там 256 быстрее до 1,6x. В остальных точках разница в пределах нескольких процентов.
+int LocalSearchThreads(int n, int k, int population) {
+  return (population >= 256 && (long long)k * n < 10000) ? 256 : 512;
+}
+
+template <bool kShared>
+void LaunchLocalSearch(int threads, int population, size_t shared_bytes, const uint32_t* bits, int words,
+                       int n, int k, int* labels, Gain* g, int* sizes, long long* f,
+                       unsigned long long* moves) {
+  if (threads == 256) {
+    KernelLocalSearch<kShared, 256><<<population, 256, shared_bytes>>>(bits, words, n, k, labels, g, sizes, f,
+                                                                       moves);
+  } else {
+    KernelLocalSearch<kShared, 512><<<population, 512, shared_bytes>>>(bits, words, n, k, labels, g, sizes, f,
+                                                                       moves);
   }
 }
 
@@ -371,12 +415,15 @@ PbilsResult SolveGpu(const Graph& graph, const PbilsParams& params) {
   }
 
   if (use_shared) {
-    CC_CUDA_CHECK(cudaFuncSetAttribute(KernelLocalSearch<true>, cudaFuncAttributeMaxDynamicSharedMemorySize,
+    CC_CUDA_CHECK(cudaFuncSetAttribute(KernelLocalSearch<true, 256>, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                       (int)shared_bytes));
+    CC_CUDA_CHECK(cudaFuncSetAttribute(KernelLocalSearch<true, 512>, cudaFuncAttributeMaxDynamicSharedMemorySize,
                                        (int)shared_bytes));
   }
+  const int ls_threads = LocalSearchThreads(n, k, population);
   if (params.verbose) {
-    std::printf("  local search state: %s (%zu bytes per block, device allows %d)\n",
-                use_shared ? "shared memory" : "global memory", shared_bytes, shared_limit);
+    std::printf("  local search state: %s (%zu bytes per block, device allows %d), %d threads per block\n",
+                use_shared ? "shared memory" : "global memory", shared_bytes, shared_limit, ls_threads);
   }
 
   DeviceArena arena;
@@ -442,11 +489,11 @@ PbilsResult SolveGpu(const Graph& graph, const PbilsParams& params) {
     std::swap(arena.f, arena.f_next);
 
     if (use_shared) {
-      KernelLocalSearch<true><<<population, kBlockSize, shared_bytes>>>(
-          arena.bits, words, n, k, arena.labels, arena.g, arena.sizes, arena.f, arena.moves);
+      LaunchLocalSearch<true>(ls_threads, population, shared_bytes, arena.bits, words, n, k, arena.labels,
+                              arena.g, arena.sizes, arena.f, arena.moves);
     } else {
-      KernelLocalSearch<false><<<population, kBlockSize>>>(
-          arena.bits, words, n, k, arena.labels, arena.g, arena.sizes, arena.f, arena.moves);
+      LaunchLocalSearch<false>(ls_threads, population, 0, arena.bits, words, n, k, arena.labels, arena.g,
+                               arena.sizes, arena.f, arena.moves);
     }
     CC_CUDA_CHECK(cudaGetLastError());
 
