@@ -97,7 +97,8 @@ nvcc -O3 -std=c++17 -Iinclude --generate-code arch=compute_89,code=sm_89 ^
 * `make test` (`bin/cc_verify.exe` на Windows): 6676 проверок формулы и инкрементальных
   обновлений против определения по парам, под GCC/Clang и MSVC.
 * CPU и GPU при одном `--seed` дают одинаковые f и число итераций, так же и
-  `--ls-kernel shared` против `--ls-kernel global`.
+  `--ls-kernel shared` против `--ls-kernel global`, а при k = 2 и отдельное ядро (`auto`)
+  против общего.
 * Ответ CPU-версии не зависит от `--threads`.
 * Значение целевой функции совпадает с тем, что выдаёт оригинал на его же инстансах.
 * Ядра собраны и запущены на RTX 4070 Ti SUPER (compute 8.9), CUDA 13.3.
