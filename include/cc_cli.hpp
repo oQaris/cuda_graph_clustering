@@ -25,6 +25,9 @@ struct Options {
   std::string graph_json_path;
   std::string save_graph_path;
   std::string save_graph_json_path;
+  std::string tags_path;
+  std::string similarity = "jaccard";
+  double threshold = 0.5;
   // алгоритм
   PbilsParams params;
   // эксперимент
@@ -46,6 +49,11 @@ inline void PrintUsage(const char* program) {
       "  --graph-json PATH     загрузить блок \"graph\" из файла результата бейзлайна\n"
       "  --save-graph PATH     сохранить инстанс как обычную матрицу\n"
       "  --save-graph-json PATH  сохранить инстанс в формате JSON бейзлайна\n"
+      "  --tags PATH           граф по тегам (data/Tags_*.json бейзлайна): n случайных объектов\n"
+      "                        по --graph-seed, ребро при сходстве тегов не ниже порога;\n"
+      "                        --n 0 берёт все объекты\n"
+      "  --similarity M        мера для --tags: jaccard (по умолчанию), cosine, dice, overlap\n"
+      "  --threshold T         порог для --tags (по умолчанию 0.5)\n"
       "\n"
       "алгоритм\n"
       "  --k K                 верхняя граница числа кластеров (по умолчанию 2)\n"
@@ -60,7 +68,9 @@ inline void PrintUsage(const char* program) {
       "  --time-limit T        лимит времени в секундах, 0 отключает (по умолчанию 0)\n"
       "  --ls-kernel WHERE     только GPU: auto (по умолчанию), shared или global -\n"
       "                        где хранится состояние решения во время локального поиска;\n"
-      "                        при k = 2 auto берёт отдельное ядро с состоянием в регистрах\n"
+      "                        при k = 2 auto берёт отдельное ядро с состоянием в регистрах;\n"
+      "                        wide - ядра с 32-битной G, которые на графе больше 32 767\n"
+      "                        вершин включаются сами\n"
       "\n"
       "эксперимент\n"
       "  --runs R              независимых прогонов, печатает min/avg/max (по умолчанию 1)\n"
@@ -106,6 +116,15 @@ inline bool Parse(int argc, char** argv, Options& options) {
     } else if (!std::strcmp(flag, "--save-graph-json")) {
       if (!NeedsValue(flag, i, argc)) return false;
       options.save_graph_json_path = value();
+    } else if (!std::strcmp(flag, "--tags")) {
+      if (!NeedsValue(flag, i, argc)) return false;
+      options.tags_path = value();
+    } else if (!std::strcmp(flag, "--similarity")) {
+      if (!NeedsValue(flag, i, argc)) return false;
+      options.similarity = value();
+    } else if (!std::strcmp(flag, "--threshold")) {
+      if (!NeedsValue(flag, i, argc)) return false;
+      options.threshold = std::strtod(value(), nullptr);
     } else if (!std::strcmp(flag, "--k")) {
       if (!NeedsValue(flag, i, argc)) return false;
       options.params.k = std::atoi(value());
@@ -142,8 +161,10 @@ inline bool Parse(int argc, char** argv, Options& options) {
         options.params.ls_kernel = PbilsParams::kLocalSearchShared;
       } else if (!std::strcmp(where, "global")) {
         options.params.ls_kernel = PbilsParams::kLocalSearchGlobal;
+      } else if (!std::strcmp(where, "wide")) {
+        options.params.ls_kernel = PbilsParams::kLocalSearchWide;
       } else {
-        std::printf("error: --ls-kernel expects auto, shared or global\n");
+        std::printf("error: --ls-kernel expects auto, shared, global or wide\n");
         return false;
       }
     } else if (!std::strcmp(flag, "--runs")) {
@@ -169,6 +190,9 @@ inline bool Parse(int argc, char** argv, Options& options) {
 }
 
 inline Graph LoadInstance(const Options& options) {
+  if (!options.tags_path.empty()) {
+    return Graph::LoadTags(options.tags_path, options.similarity, options.threshold, options.n, options.graph_seed);
+  }
   if (!options.graph_json_path.empty()) return Graph::LoadBaselineJson(options.graph_json_path);
   if (!options.graph_path.empty()) return Graph::LoadMatrix(options.graph_path);
   return Graph::ErdosRenyi(options.n, options.density, options.graph_seed);
@@ -207,6 +231,10 @@ inline void WriteResultJson(const std::string& path, const Graph& graph, const O
 }
 
 using SolverFn = PbilsResult (*)(const Graph&, const PbilsParams&);
+
+// До этого размера найденное f перепроверяется попарно, по определению; на большем графе попарный подсчёт
+// шёл бы минутами, и его заменяет ObjectiveBitwise.
+constexpr unsigned kPairwiseVerifyLimit = 32767;
 
 inline int Main(int argc, char** argv, const char* backend, SolverFn solve) {
   Options options;
@@ -251,7 +279,8 @@ inline int Main(int argc, char** argv, const char* backend, SolverFn solve) {
     }
 
     if (options.verify) {
-      const long long truth = ObjectiveDirect(graph, result.labels);
+      const long long truth = graph.Size() <= kPairwiseVerifyLimit ? ObjectiveDirect(graph, result.labels)
+                                                                   : ObjectiveBitwise(graph, result.labels);
       if (truth != result.objective) {
         std::printf("MISMATCH run %d: reported %lld, recount %lld\n", run, result.objective, truth);
         return 2;
@@ -265,6 +294,10 @@ inline int Main(int argc, char** argv, const char* backend, SolverFn solve) {
 
     std::printf("run %-3d      f=%-10lld  clusters=%-3d  iters=%-4d  %.3fs\n", run, result.objective,
                 result.clusters_used, result.iterations_done, result.seconds);
+    if (options.params.verbose && result.local_searches > 0) {
+      std::printf("moves        %lld accepted, %.0f per local search\n", result.accepted_moves,
+                  (double)result.accepted_moves / (double)result.local_searches);
+    }
   }
 
   const double avg_objective = objective_sum / options.runs;
@@ -272,7 +305,11 @@ inline int Main(int argc, char** argv, const char* backend, SolverFn solve) {
   std::printf("---\n");
   std::printf("objective    min=%lld  avg=%.2f  max=%lld\n", best.objective, avg_objective, worst);
   std::printf("time         best=%.3fs  avg=%.3fs\n", best.seconds, avg_seconds);
-  if (options.verify) std::printf("verified     reported value recounted pairwise in O(n^2)\n");
+  if (options.verify) {
+    std::printf(graph.Size() <= kPairwiseVerifyLimit
+                    ? "verified     reported value recounted pairwise in O(n^2)\n"
+                    : "verified     reported value recounted over bit rows in O(n^2/32)\n");
+  }
 
   if (!options.out_path.empty()) {
     WriteResultJson(options.out_path, graph, options, best, backend, avg_objective, worst, avg_seconds);

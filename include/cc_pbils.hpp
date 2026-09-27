@@ -26,10 +26,16 @@
 namespace cc {
 
 struct PbilsParams {
-  // Где GPU-бэкенд хранит состояние решения во время локального поиска. Оба ядра реализуют один
+  // Где GPU-бэкенд хранит состояние решения во время локального поиска. Все ядра реализуют один
   // и тот же наискорейший спуск и дают один ответ; разделяемая память намного быстрее, но
-  // ограничена по объёму.
-  enum LocalSearchKernel { kLocalSearchAuto = 0, kLocalSearchGlobal = 1, kLocalSearchShared = 2 };
+  // ограничена по объёму. Wide — ядра широкого пути с 32-битной G, которые на графе больше 32 767
+  // вершин включаются сами; явно их выбирают, чтобы сравнить с узкими на малом графе.
+  enum LocalSearchKernel {
+    kLocalSearchAuto = 0,
+    kLocalSearchGlobal = 1,
+    kLocalSearchShared = 2,
+    kLocalSearchWide = 3,
+  };
 
   int k = 2;                     // верхняя граница числа кластеров (нестрого)
   int population = 128;
@@ -57,6 +63,11 @@ struct PbilsResult {
 // Целевая функция напрямую из определения, по парам: O(n^2). Соответствует GetDistanceToGraph
 // бейзлайна и служит эталоном для всех быстрых путей.
 long long ObjectiveDirect(const Graph& graph, const std::vector<int>& labels);
+
+// То же значение по словам строк матрицы: разногласия вершины со всеми остальными — это
+// popcount(строка XOR маска её кластера) без её собственного бита. O(n^2/32) на всех ядрах: для
+// графов, где попарный подсчёт шёл бы минутами.
+long long ObjectiveBitwise(const Graph& graph, const std::vector<int>& labels);
 
 int CountClustersUsed(const std::vector<int>& labels, int k);
 

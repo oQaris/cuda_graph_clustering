@@ -8,7 +8,14 @@
 // ход), поэтому состояние решения при возможности переносится в разделяемую
 // память; G хранится 16-битными счётчиками, что вдвое сокращает трафик и вдвое
 // увеличивает инстанс, помещающийся в неё целиком.
+//
+// На графах больше 32 767 вершин 16 бит не хватает, и решатель идёт широким путём: те же ядра с
+// 32-битными G и отдельные ядра спуска для k = 2 и k = 3, у которых состояние вершины упаковано в одно
+// слово. Узкий путь от этого не меняется.
+#include <algorithm>
+#include <climits>
 #include <cstdio>
+#include <cstdlib>
 #include <chrono>
 #include <stdexcept>
 #include <string>
@@ -27,15 +34,15 @@ namespace {
 // особь" (Rebuild, LocalSearch, Select), init_blocks для поэлементных ядер (InitLabels, Perturb).
 constexpr int kBlockSize = 256;
 
-// Элементы G — счётчики соседей, не больше n, поэтому 16 бит хватает с запасом для любого
-// инстанса, с которым имеет дело решатель; SolveGpu отказывает на больших графах, а не
-// переполняется молча.
+// Элементы G — счётчики соседей, не больше n. Пока n не больше kMaxVerticesForGain, хватает 16 бит
+// (узкий путь); на большем графе G 32-битная (широкий путь), и предел задаёт упаковка хода.
 using Gain = short;
+using WideGain = int;
 constexpr int kMaxVerticesForGain = 32767;
 
-// Ход в KernelLocalSearch упакован в 31 бит: вершина << 12 | откуда << 6 | куда.
+// Ход в KernelLocalSearch упакован в 32 бита без знака: вершина << 12 | откуда << 6 | куда.
+constexpr int kMaxVerticesWide = 1 << 20;
 static_assert(kMaxClusters <= 64, "cluster index must fit in 6 bits of the packed move");
-static_assert(kMaxVerticesForGain < (1 << 19), "vertex index must fit in 19 bits of the packed move");
 
 #define CC_CUDA_CHECK(call)                                                                    \
   do {                                                                                          \
@@ -54,9 +61,12 @@ double SecondsSince(const std::chrono::steady_clock::time_point& start) {
 // Ядра
 // --------------------------------------------------------------------------
 
-__global__ void KernelInitLabels(int total, int k, int* labels, uint64_t seed) {
-  const int stride = blockDim.x * gridDim.x;
-  for (int idx = blockIdx.x * blockDim.x + threadIdx.x; idx < total; idx += stride) {
+// Поэлементные ядра (InitLabels, Perturb) идут по всем population*n меткам. На узком пути их число
+// укладывается в int, на широком может и не уложиться, поэтому тип индекса — параметр шаблона.
+template <typename Index>
+__global__ void KernelInitLabels(Index total, int k, int* labels, uint64_t seed) {
+  const Index stride = blockDim.x * gridDim.x;
+  for (Index idx = blockIdx.x * blockDim.x + threadIdx.x; idx < total; idx += stride) {
     uint64_t rng = StreamSeed(seed, idx, 0);
     labels[idx] = RandBelow(rng, k);
   }
@@ -69,14 +79,15 @@ __global__ void KernelInitLabels(int total, int k, int* labels, uint64_t seed) {
 // В горячем цикле по (v, c) индексы держим в size_t, хотя они и укладываются в int: с
 // int-арифметикой ptxas выделяет здесь 40 регистров вместо 48, и ядро на карте становится
 // медленнее. Замерено; не убирайте size_t, не повторив замер.
+template <typename GainT>
 __global__ void KernelRebuild(const uint32_t* __restrict__ bits, int words, int n, int k,
-                              const int* __restrict__ labels, Gain* g, int* sizes, long long* f,
+                              const int* __restrict__ labels, GainT* g, int* sizes, long long* f,
                               uint32_t* masks, long long edges) {
   const int sol = blockIdx.x;
   const int tid = threadIdx.x;
 
   const int* my_labels = labels + (size_t)sol * n;
-  Gain* my_g = g + (size_t)sol * k * n;
+  GainT* my_g = g + (size_t)sol * k * n;
   int* my_sizes = sizes + (size_t)sol * k;
   uint32_t* my_masks = masks + (size_t)sol * k * words;
 
@@ -98,7 +109,7 @@ __global__ void KernelRebuild(const uint32_t* __restrict__ bits, int words, int 
       const uint32_t* mask = my_masks + (size_t)c * words;
       int acc = 0;
       for (int w = 0; w < words; ++w) acc += __popc(row[w] & mask[w]);
-      my_g[(size_t)c * n + v] = (Gain)acc;
+      my_g[(size_t)c * n + v] = (GainT)acc;
     }
     intra_twice += my_g[(size_t)my_labels[v] * n + v];
   }
@@ -127,20 +138,30 @@ __global__ void KernelDegrees(const uint32_t* __restrict__ bits, int words, int 
 // KernelRebuild для k = 2. Маска кластера 1 собирается __ballot_sync прямо в разделяемую память
 // (варп читает 32 метки подряд — это ровно одно слово маски), и popcount нужен только по ней:
 // G[0] достраивается из степени. Выходит вдвое меньше проходов по матрице и ни одного атомика.
-// Наибольшее n для ядер k = 2: вершина должна уложиться в 15 бит ключа KernelLocalSearch2.
+// Наибольшее n для ядер k = 2 узкого пути: вершина должна уложиться в 15 бит ключа KernelLocalSearch2.
+// На широком пути маска не помещается в статический массив и лежит в динамической разделяемой памяти
+// (words * 4 байта, до 99 КБ — это n до ~800 тысяч).
 constexpr int kMaxVerticesForK2 = 32767;
 constexpr int kMaxWordsK2 = (kMaxVerticesForK2 + 32) / 32;
 
+template <typename GainT, bool kWide>
 __global__ void KernelRebuild2(const uint32_t* __restrict__ bits, int words, int n,
-                               const int* __restrict__ degrees, const int* __restrict__ labels, Gain* g,
+                               const int* __restrict__ degrees, const int* __restrict__ labels, GainT* g,
                                int* sizes, long long* f, long long edges) {
   const int sol = blockIdx.x;
   const int tid = threadIdx.x;
   const int lane = tid & 31;
   const int* my_labels = labels + (size_t)sol * n;
-  Gain* my_g = g + (size_t)sol * 2 * n;
+  GainT* my_g = g + (size_t)sol * 2 * n;
 
-  __shared__ uint32_t mask[kMaxWordsK2];
+  uint32_t* mask;
+  if constexpr (kWide) {
+    extern __shared__ unsigned char dynamic_shared[];
+    mask = reinterpret_cast<uint32_t*>(dynamic_shared);
+  } else {
+    __shared__ uint32_t static_mask[kMaxWordsK2];
+    mask = static_mask;
+  }
   __shared__ long long reduce[kBlockSize];
 
   int ones = 0;
@@ -160,8 +181,8 @@ __global__ void KernelRebuild2(const uint32_t* __restrict__ bits, int words, int
     int g1 = 0;
     for (int w = 0; w < words; ++w) g1 += __popc(row[w] & mask[w]);
     const int g0 = degrees[v] - g1;
-    my_g[v] = (Gain)g0;
-    my_g[n + v] = (Gain)g1;
+    my_g[v] = (GainT)g0;
+    my_g[n + v] = (GainT)g1;
     intra_twice += (mask[v >> 5] >> (v & 31)) & 1u ? g1 : g0;
   }
 
@@ -206,9 +227,10 @@ __global__ void KernelRebuild2(const uint32_t* __restrict__ bits, int words, int
 // k >= 16 и популяции 1024 ядро замедляется на десятки процентов.
 // Ход упакован в 64-битный ключ (дельта, вершина, откуда, куда), и минимум ключа даёт то же
 // разрешение ничьих, что и CPU: меньшая дельта, затем меньшая вершина, затем меньший кластер.
-template <bool kShared, int kThreads>
+// GainT — тип элементов G: short на узком пути, int на широком.
+template <bool kShared, int kThreads, typename GainT>
 __global__ void __launch_bounds__(kThreads)
-KernelLocalSearch(const uint32_t* __restrict__ bits, int words, int n, int k, int* labels, Gain* g,
+KernelLocalSearch(const uint32_t* __restrict__ bits, int words, int n, int k, int* labels, GainT* g,
                   int* sizes, long long* f, unsigned long long* accepted_moves) {
   using Label = typename std::conditional<kShared, signed char, int>::type;
   constexpr int kWarps = kThreads / 32;
@@ -218,16 +240,16 @@ KernelLocalSearch(const uint32_t* __restrict__ bits, int words, int n, int k, in
   const int tid = threadIdx.x;
 
   int* my_labels = labels + (size_t)sol * n;
-  Gain* my_g = g + (size_t)sol * k * n;
+  GainT* my_g = g + (size_t)sol * k * n;
   int* my_sizes = sizes + (size_t)sol * k;
 
   __shared__ long long warp_best[2][kWarps];
 
-  Gain* wg;   // рабочее G текущего решения
+  GainT* wg;  // рабочее G текущего решения
   Label* wl;  // рабочие метки текущего решения
   if constexpr (kShared) {
     extern __shared__ unsigned char dynamic_shared[];
-    Gain* sg = reinterpret_cast<Gain*>(dynamic_shared);            // k * n элементов
+    GainT* sg = reinterpret_cast<GainT*>(dynamic_shared);           // k * n элементов
     Label* slabel = reinterpret_cast<Label*>(sg + (size_t)k * n);  // n элементов
     // Копирование идёт по той же схеме владения, что и спуск, поэтому барьер после него не нужен.
     for (int c = 0; c < k; ++c) {
@@ -279,7 +301,7 @@ KernelLocalSearch(const uint32_t* __restrict__ bits, int words, int n, int k, in
     long long key = kNoMove;
     if (local_vertex >= 0) {
       key = (long long)local_delta * 4294967296LL +
-            (long long)((local_vertex << 12) | (local_from << 6) | local_target);
+            (long long)(((unsigned)local_vertex << 12) | ((unsigned)local_from << 6) | (unsigned)local_target);
     }
     for (int offset = 16; offset > 0; offset >>= 1) {
       const long long other = __shfl_down_sync(0xffffffffu, key, offset);
@@ -296,10 +318,10 @@ KernelLocalSearch(const uint32_t* __restrict__ bits, int words, int n, int k, in
     if (best >= 0) break;  // улучшающих ходов не осталось
 
     const int delta = (int)(best >> 32);
-    const int payload = (int)(best & 0xffffffffLL);
-    const int v = payload >> 12;
-    const int from = (payload >> 6) & 63;
-    const int to = payload & 63;
+    const unsigned payload = (unsigned)(best & 0xffffffffLL);
+    const int v = (int)(payload >> 12);
+    const int from = (int)((payload >> 6) & 63u);
+    const int to = (int)(payload & 63u);
 
     // Буфер parity дочитан всеми (они прошли барьер): доводим его до размеров после этого хода.
     for (int c = tid; c < k; c += kThreads) {
@@ -310,8 +332,8 @@ KernelLocalSearch(const uint32_t* __restrict__ bits, int words, int n, int k, in
     parity ^= 1;
 
     const uint32_t* row = bits + (size_t)v * words;
-    Gain* g_from = wg + from * n;
-    Gain* g_to = wg + to * n;
+    GainT* g_from = wg + from * n;
+    GainT* g_to = wg + to * n;
     for (int u = tid; u < n; u += kThreads) {
       if ((row[u >> 5] >> (u & 31)) & 1u) {
         g_from[u] -= 1;
@@ -480,6 +502,273 @@ KernelLocalSearch2(const uint32_t* __restrict__ bits, int words, int n, int* lab
   }
 }
 
+// Минимум 64-битных ключей по варпу. На sm_80+ это две 32-битные редукции: сначала старшая половина,
+// затем младшая среди потоков, у которых старшая совпала с минимумом.
+__device__ __forceinline__ unsigned long long WarpMin64(unsigned long long key) {
+#if __CUDA_ARCH__ >= 800
+  const unsigned high = __reduce_min_sync(0xffffffffu, (unsigned)(key >> 32));
+  const unsigned low = __reduce_min_sync(0xffffffffu, (unsigned)(key >> 32) == high ? (unsigned)key : 0xffffffffu);
+  return ((unsigned long long)high << 32) | low;
+#else
+  for (int offset = 16; offset > 0; offset >>= 1) {
+    const unsigned long long other = __shfl_xor_sync(0xffffffffu, key, offset);
+    if (other < key) key = other;
+  }
+  return key;
+#endif
+}
+
+// Спуск k = 2 для широкого пути, где e и метки уже не помещаются в регистры блока (n > 32 768).
+// Алгебра та же, что у KernelLocalSearch2, но состояние вершины лежит в глобальной памяти одним словом
+// w = 2e + метка — на месте строки G[0] особи: во время спуска G не нужна, а в конце восстанавливается из
+// e и степени. Через w дельта считается напрямую: s - w при метке 0 и w + 1 - s при метке 1. За ход поток
+// читает слово каждой своей вершины и строку смежности v (одна загрузка на варп, бит потока — бит lane),
+// пишет — только соседям v. Правка слита со сканом следующего хода, барьер на ход один. Ключ 64-битный:
+// (Δ + n) << 32 | u << 1 | метка; улучшающая Δ лежит в [1 - n, -1], так что старшая половина
+// положительна, а порядок ключей даёт то же разрешение ничьих, что и CPU.
+//
+// Сетка постоянная: блоков запускается столько, чтобы их состояние (4n байт на особь) помещалось в L2, и
+// блок берёт следующую особь из счётчика next_individual, пока они не кончатся. Когда состояние всех
+// работающих блоков в L2 не помещается, ход упирается в пропускную способность видеопамяти.
+constexpr unsigned long long kNoMoveWide = ~0ull;
+
+template <int kThreads>
+__global__ void __launch_bounds__(kThreads)
+KernelLocalSearch2Wide(const uint32_t* __restrict__ bits, int words, int n, int population,
+                       const int* __restrict__ degrees, int* labels, WideGain* g, int* sizes, long long* f,
+                       unsigned long long* accepted_moves, int* next_individual) {
+  constexpr int kWarps = kThreads / 32;
+  static_assert(kThreads % 32 == 0 && kWarps <= 32, "block must be 1..32 whole warps");
+
+  const int tid = threadIdx.x;
+  const int lane = tid & 31;
+  const uint32_t lane_bit = 1u << lane;
+
+  __shared__ unsigned long long warp_best[2][kWarps];
+  __shared__ int current;
+
+  while (true) {
+    if (tid == 0) current = atomicAdd(next_individual, 1);
+    __syncthreads();
+    const int sol = current;
+    if (sol >= population) break;
+
+    int* my_labels = labels + (size_t)sol * n;
+    WideGain* my_g = g + (size_t)sol * 2 * n;
+    int* state = my_g;  // строка G[0] на время спуска
+
+    auto key_of = [&](int best_delta, int best_u, int best_word) {
+      if (best_u < 0) return kNoMoveWide;
+      return ((unsigned long long)(best_delta + n) << 32) | ((unsigned)best_u << 1) | (unsigned)(best_word & 1);
+    };
+
+    int n0 = sizes[(size_t)sol * 2];
+    long long objective = f[sol];
+    int s = n - 2 * n0 + 1;
+    int best_delta = 0;
+    int best_u = -1;
+    int best_word = 0;
+    for (int u = tid; u < n; u += kThreads) {
+      const int word = 2 * (my_g[n + u] - my_g[u]) + my_labels[u];
+      state[u] = word;
+      const int delta = (word & 1) ? word + 1 - s : s - word;
+      if (delta < best_delta) {
+        best_delta = delta;
+        best_u = u;
+        best_word = word;
+      }
+    }
+    unsigned long long key = key_of(best_delta, best_u, best_word);
+
+    unsigned long long applied = 0;
+    int parity = 0;
+    while (true) {
+      key = WarpMin64(key);
+      if (lane == 0) warp_best[parity][tid >> 5] = key;
+      __syncthreads();
+      const unsigned long long best = WarpMin64(warp_best[parity][lane < kWarps ? lane : 0]);
+      if (best == kNoMoveWide) break;
+      parity ^= 1;
+
+      const int delta = (int)(best >> 32) - n;
+      const int v = (int)((unsigned)best >> 1);
+      const int from = (int)(best & 1u);
+      n0 += from ? 1 : -1;
+      s = n - 2 * n0 + 1;
+      const int shift = from ? -4 : 4;  // e соседа меняется на -+2, слово — вдвое больше
+      if (v % kThreads == tid) state[v] ^= 1;
+
+      const uint32_t* row = bits + (size_t)v * words;
+      best_delta = 0;
+      best_u = -1;
+#pragma unroll 4
+      for (int u = tid; u < n; u += kThreads) {
+        int word = state[u];
+        if (__ldg(row + (u >> 5)) & lane_bit) {
+          word += shift;
+          state[u] = word;
+        }
+        const int du = (word & 1) ? word + 1 - s : s - word;
+        if (du < best_delta) {
+          best_delta = du;
+          best_u = u;
+          best_word = word;
+        }
+      }
+      key = key_of(best_delta, best_u, best_word);
+      objective += delta;
+      ++applied;
+    }
+
+    for (int u = tid; u < n; u += kThreads) {
+      const int word = state[u];
+      const int e = word >> 1;
+      const int degree = degrees[u];
+      my_labels[u] = word & 1;
+      my_g[u] = (degree - e) / 2;
+      my_g[n + u] = (degree + e) / 2;
+    }
+    if (tid == 0) {
+      sizes[(size_t)sol * 2] = n0;
+      sizes[(size_t)sol * 2 + 1] = n - n0;
+      f[sol] = objective;
+      if (accepted_moves != nullptr) atomicAdd(accepted_moves, applied);
+    }
+    // warp_best и current перепишет уже следующая особь: все должны дочитать их для этой.
+    __syncthreads();
+  }
+}
+
+// Спуск k = 3 для широкого пути. Состояние вершины — одно 64-битное слово: три счётчика G по 20 бит
+// (n < 2^20, так что G <= n - 1 в поле помещается) и метка в двух старших битах. Слова лежат в отдельном
+// буфере work (8n байт на особь, вдвое меньше, чем G и метки общего ядра), G и метки восстанавливаются в
+// конце. Перенос соседа v из from в to правит слово одним сложением: G[from] >= 1 (там сам v), а G[to] + 1 не
+// больше степени, так что переносов между полями не бывает. Дельта хода — через h_c = s_c - 2 G[c]:
+// Δ(a -> c) = h_c - h_a + 1, и лучшая цель вершины — меньший h из двух чужих кластеров, при равенстве меньший
+// номер. Размеры кластеров каждый поток ведёт в регистрах: выбранный ход видят все. Ключ
+// (Δ + n) << 24 | u << 4 | откуда << 2 | куда даёт то же разрешение ничьих, что и CPU. Сетка постоянная, как
+// у KernelLocalSearch2Wide.
+constexpr int kFieldBits = 20;
+constexpr unsigned long long kFieldMask = (1ull << kFieldBits) - 1;
+static_assert(kMaxVerticesWide <= (1 << kFieldBits), "G must fit in a 20-bit field of the packed k = 3 word");
+
+template <int kThreads>
+__global__ void __launch_bounds__(kThreads)
+KernelLocalSearch3Wide(const uint32_t* __restrict__ bits, int words, int n, int population, int* labels,
+                       WideGain* g, int* sizes, long long* f, unsigned long long* work,
+                       unsigned long long* accepted_moves, int* next_individual) {
+  constexpr int kWarps = kThreads / 32;
+  static_assert(kThreads % 32 == 0 && kWarps <= 32, "block must be 1..32 whole warps");
+
+  const int tid = threadIdx.x;
+  const int lane = tid & 31;
+  const uint32_t lane_bit = 1u << lane;
+
+  __shared__ unsigned long long warp_best[2][kWarps];
+  __shared__ int current;
+
+  while (true) {
+    if (tid == 0) current = atomicAdd(next_individual, 1);
+    __syncthreads();
+    const int sol = current;
+    if (sol >= population) break;
+
+    int* my_labels = labels + (size_t)sol * n;
+    WideGain* my_g = g + (size_t)sol * 3 * n;
+    unsigned long long* state = work + (size_t)sol * n;
+    int s0 = sizes[(size_t)sol * 3];
+    int s1 = sizes[(size_t)sol * 3 + 1];
+    int s2 = sizes[(size_t)sol * 3 + 2];
+    long long objective = f[sol];
+
+    int best_delta = 0;
+    int best_move = -1;  // u << 4 | откуда << 2 | куда
+    auto consider = [&](unsigned long long word, int u) {
+      const int a = (int)(word >> 62);
+      const int h0 = s0 - 2 * (int)(word & kFieldMask);
+      const int h1 = s1 - 2 * (int)((word >> kFieldBits) & kFieldMask);
+      const int h2 = s2 - 2 * (int)((word >> (2 * kFieldBits)) & kFieldMask);
+      const int ha = a == 0 ? h0 : (a == 1 ? h1 : h2);
+      const int low = a == 0 ? h1 : h0;  // чужой кластер с меньшим номером
+      const int high = a == 2 ? h1 : h2;
+      const bool take_high = high < low;
+      const int delta = (take_high ? high : low) - ha + 1;
+      if (delta < best_delta) {
+        best_delta = delta;
+        best_move = (u << 4) | (a << 2) | (take_high ? (a == 2 ? 1 : 2) : (a == 0 ? 1 : 0));
+      }
+    };
+    auto key_of = [&]() {
+      if (best_move < 0) return kNoMoveWide;
+      return ((unsigned long long)(best_delta + n) << 24) | (unsigned)best_move;
+    };
+
+    for (int u = tid; u < n; u += kThreads) {
+      const unsigned long long word = (unsigned long long)my_g[u] |
+                                      ((unsigned long long)my_g[n + u] << kFieldBits) |
+                                      ((unsigned long long)my_g[2 * n + u] << (2 * kFieldBits)) |
+                                      ((unsigned long long)my_labels[u] << 62);
+      state[u] = word;
+      consider(word, u);
+    }
+    unsigned long long key = key_of();
+
+    unsigned long long applied = 0;
+    int parity = 0;
+    while (true) {
+      key = WarpMin64(key);
+      if (lane == 0) warp_best[parity][tid >> 5] = key;
+      __syncthreads();
+      const unsigned long long best = WarpMin64(warp_best[parity][lane < kWarps ? lane : 0]);
+      if (best == kNoMoveWide) break;
+      parity ^= 1;
+
+      const int delta = (int)(best >> 24) - n;
+      const int move = (int)(best & 0xffffffu);
+      const int v = move >> 4;
+      const int from = (move >> 2) & 3;
+      const int to = move & 3;
+      s0 += (to == 0) - (from == 0);
+      s1 += (to == 1) - (from == 1);
+      s2 += (to == 2) - (from == 2);
+      const unsigned long long inc = (1ull << (kFieldBits * to)) - (1ull << (kFieldBits * from));
+      if (v % kThreads == tid) state[v] = (state[v] & ~(3ull << 62)) | ((unsigned long long)to << 62);
+
+      const uint32_t* row = bits + (size_t)v * words;
+      best_delta = 0;
+      best_move = -1;
+#pragma unroll 4
+      for (int u = tid; u < n; u += kThreads) {
+        unsigned long long word = state[u];
+        if (__ldg(row + (u >> 5)) & lane_bit) {
+          word += inc;
+          state[u] = word;
+        }
+        consider(word, u);
+      }
+      key = key_of();
+      objective += delta;
+      ++applied;
+    }
+
+    for (int u = tid; u < n; u += kThreads) {
+      const unsigned long long word = state[u];
+      my_g[u] = (WideGain)(word & kFieldMask);
+      my_g[n + u] = (WideGain)((word >> kFieldBits) & kFieldMask);
+      my_g[2 * n + u] = (WideGain)((word >> (2 * kFieldBits)) & kFieldMask);
+      my_labels[u] = (int)(word >> 62);
+    }
+    if (tid == 0) {
+      sizes[(size_t)sol * 3] = s0;
+      sizes[(size_t)sol * 3 + 1] = s1;
+      sizes[(size_t)sol * 3 + 2] = s2;
+      f[sol] = objective;
+      if (accepted_moves != nullptr) atomicAdd(accepted_moves, applied);
+    }
+    __syncthreads();  // warp_best и current перепишет уже следующая особь
+  }
+}
+
 // Потоков на блок локального поиска. Правило снято замером на RTX 4070 Ti SUPER (66 SM), сетка
 // n = 500..16000, k = 3 и 8, популяция 64..4096. Пока блоков мало, карта недогружена, и больший блок
 // быстрее — до 1,95x при популяции 64. Когда популяция уже заполняет SM, а работы на особь мало
@@ -543,25 +832,109 @@ void DispatchLocalSearch2(int population, const uint32_t* bits, int words, int n
   }
 }
 
-template <bool kShared>
+template <bool kShared, typename GainT>
 void LaunchLocalSearch(int threads, int population, size_t shared_bytes, const uint32_t* bits, int words,
-                       int n, int k, int* labels, Gain* g, int* sizes, long long* f,
+                       int n, int k, int* labels, GainT* g, int* sizes, long long* f,
                        unsigned long long* moves) {
-  if (threads == 256) {
-    KernelLocalSearch<kShared, 256><<<population, 256, shared_bytes>>>(bits, words, n, k, labels, g, sizes, f,
-                                                                       moves);
-  } else {
-    KernelLocalSearch<kShared, 512><<<population, 512, shared_bytes>>>(bits, words, n, k, labels, g, sizes, f,
-                                                                       moves);
+  if constexpr (!kShared && std::is_same<GainT, WideGain>::value) {
+    if (threads == 1024) {
+      KernelLocalSearch<false, 1024, WideGain><<<population, 1024>>>(bits, words, n, k, labels, g, sizes, f, moves);
+      return;
+    }
   }
+  if (threads == 256) {
+    KernelLocalSearch<kShared, 256, GainT><<<population, 256, shared_bytes>>>(bits, words, n, k, labels, g, sizes,
+                                                                              f, moves);
+  } else {
+    KernelLocalSearch<kShared, 512, GainT><<<population, 512, shared_bytes>>>(bits, words, n, k, labels, g, sizes,
+                                                                              f, moves);
+  }
+}
+
+// Широкий путь всегда идёт блоками по 1024 потока: на вершину там приходятся сотни итераций цикла, и
+// лишние потоки только помогают. Общее ядро (k >= 4) с 1024 потоками быстрее, чем с 512, в 1,1–1,3 раза
+// (выборка Stack Overflow в 60 000 вершин, k = 4 и 6). Ядра k = 2 и k = 3 идут постоянной сеткой, в которой
+// блоков меньше, чем SM, и каждому блоку лучше занять свой SM целиком.
+constexpr int kWideThreads = 1024;
+
+// Доля L2 под состояние особей, которые спускаются одновременно. Меньше блоков — простаивают SM, больше —
+// состояние вытесняется из L2 в видеопамять; в обе стороны итерация дорожает на 10–25 %. Снято замером на
+// RTX 4070 Ti SUPER (48 МБ L2) на всём NUS-WIDE (193 734 вершины) и выборке Stack Overflow в 330 000 вершин:
+// лучшее число блоков занимало при k = 2 52 и 74 % L2, при k = 3 от 72 до 110 % (там разница в пределах 3 %).
+constexpr double kL2ShareK2 = 0.6;
+constexpr double kL2ShareK3 = 0.8;
+
+// Запуски, которые на двух путях идут разными ядрами, разведены перегрузками по типу G, а не if constexpr:
+// nvcc не всегда отбрасывает ветку if constexpr с запуском ядра внутри шаблона.
+void LaunchRebuild2(int population, size_t mask_bytes, const uint32_t* bits, int words, int n, const int* degrees,
+                    const int* labels, Gain* g, int* sizes, long long* f, long long edges) {
+  (void)mask_bytes;
+  KernelRebuild2<Gain, false><<<population, kBlockSize>>>(bits, words, n, degrees, labels, g, sizes, f, edges);
+}
+
+void LaunchRebuild2(int population, size_t mask_bytes, const uint32_t* bits, int words, int n, const int* degrees,
+                    const int* labels, WideGain* g, int* sizes, long long* f, long long edges) {
+  KernelRebuild2<WideGain, true><<<population, kBlockSize, mask_bytes>>>(bits, words, n, degrees, labels, g, sizes,
+                                                                         f, edges);
+}
+
+void DispatchLocalSearch2(int blocks, int population, const uint32_t* bits, int words, int n, const int* degrees,
+                          int* labels, Gain* g, int* sizes, long long* f, unsigned long long* moves,
+                          int* next_individual) {
+  (void)blocks;
+  (void)degrees;
+  (void)next_individual;
+  DispatchLocalSearch2(population, bits, words, n, labels, g, sizes, f, moves);
+}
+
+void DispatchLocalSearch2(int blocks, int population, const uint32_t* bits, int words, int n, const int* degrees,
+                          int* labels, WideGain* g, int* sizes, long long* f, unsigned long long* moves,
+                          int* next_individual) {
+  CC_CUDA_CHECK(cudaMemsetAsync(next_individual, 0, sizeof(int)));
+  KernelLocalSearch2Wide<kWideThreads><<<blocks, kWideThreads>>>(bits, words, n, population, degrees, labels, g,
+                                                                 sizes, f, moves, next_individual);
+}
+
+void LaunchLocalSearch3(int blocks, int population, const uint32_t* bits, int words, int n, int* labels, Gain* g,
+                        int* sizes, long long* f, unsigned long long* work, unsigned long long* moves,
+                        int* next_individual) {
+  // На узком пути k = 3 идёт общим ядром; перегрузка нужна только для единообразного вызова из Solve.
+  (void)blocks, (void)population, (void)bits, (void)words, (void)n, (void)labels, (void)g, (void)sizes;
+  (void)f, (void)work, (void)moves, (void)next_individual;
+  throw std::logic_error("k = 3 wide kernel called on the narrow path");
+}
+
+void LaunchLocalSearch3(int blocks, int population, const uint32_t* bits, int words, int n, int* labels,
+                        WideGain* g, int* sizes, long long* f, unsigned long long* work, unsigned long long* moves,
+                        int* next_individual) {
+  CC_CUDA_CHECK(cudaMemsetAsync(next_individual, 0, sizeof(int)));
+  KernelLocalSearch3Wide<kWideThreads><<<blocks, kWideThreads>>>(bits, words, n, population, labels, g, sizes, f,
+                                                                 work, moves, next_individual);
+}
+
+// Сколько блоков постоянной сетки запускать: не больше, чем помещается на карту, и столько, чтобы состояние
+// работающих особей (state_bytes на каждую) занимало не больше доли l2_share кэша L2.
+int ResidentBlocks(const void* kernel, size_t state_bytes, int population, double l2_share) {
+  int device = 0;
+  CC_CUDA_CHECK(cudaGetDevice(&device));
+  int sms = 0;
+  int l2_bytes = 0;
+  CC_CUDA_CHECK(cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, device));
+  CC_CUDA_CHECK(cudaDeviceGetAttribute(&l2_bytes, cudaDevAttrL2CacheSize, device));
+  int per_sm = 0;
+  CC_CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&per_sm, kernel, kWideThreads, 0));
+  const long long fit = (long long)(l2_share * l2_bytes / (double)std::max<size_t>(state_bytes, 1));
+  const long long blocks = std::min<long long>(std::max(1, sms * per_sm), std::max(1LL, fit));
+  return (int)std::min<long long>(blocks, population);
 }
 
 // Турнирная селекция. Один блок на слот следующей популяции; метки, G и размеры победителя
 // копируются целиком, поэтому пересчёт после неё не нужен.
+template <typename GainT>
 __global__ void KernelSelect(int n, int k, int population, int tournament,
-                             const int* __restrict__ labels, const Gain* __restrict__ g,
+                             const int* __restrict__ labels, const GainT* __restrict__ g,
                              const int* __restrict__ sizes, const long long* __restrict__ f,
-                             int* out_labels, Gain* out_g, int* out_sizes, long long* out_f,
+                             int* out_labels, GainT* out_g, int* out_sizes, long long* out_f,
                              uint64_t seed, int iteration) {
   const int slot = blockIdx.x;
   const int tid = threadIdx.x;
@@ -597,10 +970,11 @@ __global__ void KernelSelect(int n, int k, int population, int tournament,
 }
 
 // Перемаркирует каждую вершину с заданной вероятностью; G пересчитывается после.
-__global__ void KernelPerturb(int total, int k, float probability, int* labels, uint64_t seed,
+template <typename Index>
+__global__ void KernelPerturb(Index total, int k, float probability, int* labels, uint64_t seed,
                               int iteration) {
-  const int stride = blockDim.x * gridDim.x;
-  for (int idx = blockIdx.x * blockDim.x + threadIdx.x; idx < total; idx += stride) {
+  const Index stride = blockDim.x * gridDim.x;
+  for (Index idx = blockIdx.x * blockDim.x + threadIdx.x; idx < total; idx += stride) {
     uint64_t rng = StreamSeed(seed, idx, iteration + 0x5000000ull);
     if (RandFloat(rng) >= probability) continue;
     const int shift = 1 + (int)RandBelow(rng, k - 1);
@@ -609,12 +983,13 @@ __global__ void KernelPerturb(int total, int k, float probability, int* labels, 
 }
 
 // Буферы устройства для одного запуска.
+template <typename GainT>
 struct DeviceArena {
   uint32_t* bits = nullptr;
   int* labels = nullptr;
   int* labels_next = nullptr;
-  Gain* g = nullptr;
-  Gain* g_next = nullptr;
+  GainT* g = nullptr;
+  GainT* g_next = nullptr;
   int* sizes = nullptr;
   int* sizes_next = nullptr;
   long long* f = nullptr;
@@ -622,6 +997,8 @@ struct DeviceArena {
   uint32_t* masks = nullptr;
   unsigned long long* moves = nullptr;
   int* degrees = nullptr;
+  int* next_individual = nullptr;
+  unsigned long long* work = nullptr;
 
   ~DeviceArena() {
     cudaFree(bits);
@@ -636,22 +1013,18 @@ struct DeviceArena {
     cudaFree(masks);
     cudaFree(moves);
     cudaFree(degrees);
+    cudaFree(next_individual);
+    cudaFree(work);
   }
 };
 
-}  // namespace
+std::string Mebibytes(size_t bytes) { return std::to_string((bytes + (1u << 20) - 1) >> 20) + " MiB"; }
 
-PbilsResult SolveGpu(const Graph& graph, const PbilsParams& params) {
-  if (params.k < 1) throw std::runtime_error("k must be >= 1");
-  if (params.k > kMaxClusters) {
-    throw std::runtime_error("k exceeds kMaxClusters (" + std::to_string(kMaxClusters) +
-                             "); raise it in cc_gpu.hpp and rebuild");
-  }
-  if (params.population < 1) throw std::runtime_error("population must be >= 1");
-  if ((int)graph.Size() > kMaxVerticesForGain) {
-    throw std::runtime_error("n exceeds " + std::to_string(kMaxVerticesForGain) +
-                             ", the range of the 16-bit G matrix");
-  }
+// Весь запуск на устройстве. GainT выбирает путь: Gain — узкий, как был, WideGain — широкий.
+template <typename GainT>
+PbilsResult Solve(const Graph& graph, const PbilsParams& params) {
+  constexpr bool kWide = std::is_same<GainT, WideGain>::value;
+  using Index = typename std::conditional<kWide, long long, int>::type;
 
   const auto started = std::chrono::steady_clock::now();
 
@@ -662,7 +1035,7 @@ PbilsResult SolveGpu(const Graph& graph, const PbilsParams& params) {
   const long long edges = (long long)graph.EdgeCount();
 
   // Выбор, где состояние решения живёт во время локального поиска.
-  const size_t shared_bytes = sizeof(Gain) * (size_t)k * n + (size_t)n;
+  const size_t shared_bytes = sizeof(GainT) * (size_t)k * n + (size_t)n;
   int device = 0;
   CC_CUDA_CHECK(cudaGetDevice(&device));
   int shared_limit = 0;
@@ -670,58 +1043,111 @@ PbilsResult SolveGpu(const Graph& graph, const PbilsParams& params) {
 
   bool use_shared = false;
   if (params.ls_kernel == PbilsParams::kLocalSearchShared) {
-    if (shared_bytes > (size_t)shared_limit) {
+    if (kWide || shared_bytes > (size_t)shared_limit) {
       throw std::runtime_error("state needs " + std::to_string(shared_bytes) +
                                " bytes of shared memory, device allows " + std::to_string(shared_limit));
     }
     use_shared = true;
   } else if (params.ls_kernel == PbilsParams::kLocalSearchAuto) {
-    use_shared = shared_bytes <= (size_t)shared_limit;
+    use_shared = !kWide && shared_bytes <= (size_t)shared_limit;
   }
 
-  if (use_shared) {
-    CC_CUDA_CHECK(cudaFuncSetAttribute(KernelLocalSearch<true, 256>, cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                       (int)shared_bytes));
-    CC_CUDA_CHECK(cudaFuncSetAttribute(KernelLocalSearch<true, 512>, cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                       (int)shared_bytes));
+  if constexpr (!kWide) {
+    if (use_shared) {
+      CC_CUDA_CHECK(cudaFuncSetAttribute(KernelLocalSearch<true, 256, Gain>,
+                                         cudaFuncAttributeMaxDynamicSharedMemorySize, (int)shared_bytes));
+      CC_CUDA_CHECK(cudaFuncSetAttribute(KernelLocalSearch<true, 512, Gain>,
+                                         cudaFuncAttributeMaxDynamicSharedMemorySize, (int)shared_bytes));
+    }
   }
-  const int ls_threads = LocalSearchThreads(n, k, population);
-  // При k = 2 спуск идёт отдельным ядром с состоянием в регистрах; явный выбор shared/global
-  // оставляет общее ядро, чтобы его можно было сравнить с этим.
-  const bool use_k2 = k == 2 && params.ls_kernel == PbilsParams::kLocalSearchAuto && n <= kMaxVerticesForK2;
-  if (params.verbose && use_k2) {
-    std::printf("  local search: k = 2 register kernel, %d threads x %d vertices\n",
-                LocalSearchThreads2(n, population), VerticesPerThread2(n, LocalSearchThreads2(n, population)));
+  const int ls_threads = kWide ? kWideThreads : LocalSearchThreads(n, k, population);
+  // При k = 2 спуск идёт отдельным ядром: на узком пути с состоянием в регистрах, на широком — в глобальной
+  // памяти. Явный выбор shared/global оставляет общее ядро, чтобы его можно было сравнить с этим. На широком
+  // пути так же идёт и k = 3.
+  const bool use_k2 = k == 2 && (kWide ? params.ls_kernel != PbilsParams::kLocalSearchGlobal
+                                       : params.ls_kernel == PbilsParams::kLocalSearchAuto && n <= kMaxVerticesForK2);
+  const bool use_k3 = kWide && k == 3 && params.ls_kernel != PbilsParams::kLocalSearchGlobal;
+  const int ls_threads2 = kWide ? kWideThreads : LocalSearchThreads2(n, population);
+  // Блоков постоянной сетки у ядер k = 2 и k = 3 широкого пути; у остальных ядер блок на особь.
+  int ls_blocks = population;
+  if (kWide && use_k2) {
+    ls_blocks = ResidentBlocks((const void*)KernelLocalSearch2Wide<kWideThreads>, (size_t)n * sizeof(int), population,
+                               kL2ShareK2);
+  } else if (use_k3) {
+    ls_blocks = ResidentBlocks((const void*)KernelLocalSearch3Wide<kWideThreads>,
+                               (size_t)n * sizeof(unsigned long long), population, kL2ShareK3);
+  }
+  // Маска кластера 1 для KernelRebuild2 широкого пути лежит в динамической разделяемой памяти.
+  const size_t mask_bytes = (size_t)words * sizeof(uint32_t);
+  if (kWide && use_k2) {
+    if (mask_bytes > (size_t)shared_limit) {
+      throw std::runtime_error("cluster mask needs " + std::to_string(mask_bytes) +
+                               " bytes of shared memory, device allows " + std::to_string(shared_limit));
+    }
+    CC_CUDA_CHECK(cudaFuncSetAttribute(KernelRebuild2<WideGain, true>, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                       (int)mask_bytes));
   }
   if (params.verbose) {
-    std::printf("  local search state: %s (%zu bytes per block, device allows %d), %d threads per block\n",
-                use_shared ? "shared memory" : "global memory", shared_bytes, shared_limit, ls_threads);
+    if (kWide) {
+      std::printf("  local search: wide path (32-bit G), %s kernel, %d threads per block, %d blocks\n",
+                  use_k2 ? "k = 2" : (use_k3 ? "k = 3" : "generic"), kWideThreads, ls_blocks);
+    } else {
+      if (use_k2) {
+        std::printf("  local search: k = 2 register kernel, %d threads x %d vertices\n", ls_threads2,
+                    VerticesPerThread2(n, ls_threads2));
+      }
+      std::printf("  local search state: %s (%zu bytes per block, device allows %d), %d threads per block\n",
+                  use_shared ? "shared memory" : "global memory", shared_bytes, shared_limit, ls_threads);
+    }
   }
 
-  DeviceArena arena;
   const size_t bits_bytes = graph.Bits().size() * sizeof(uint32_t);
   const size_t labels_count = (size_t)population * n;
   const size_t g_count = (size_t)population * k * n;
   const size_t sizes_count = (size_t)population * k;
-  const size_t masks_count = (size_t)population * k * words;
+  const size_t masks_count = use_k2 ? 0 : (size_t)population * k * words;
 
+  // Под WDDM аллокация сверх физической памяти карты проходит: драйвер молча выносит её в ОЗУ, и ядра
+  // замедляются в разы. Поэтому объём сверяется со свободной памятью заранее.
+  const size_t device_bytes = bits_bytes + 2 * labels_count * sizeof(int) + 2 * g_count * sizeof(GainT) +
+                              2 * sizes_count * sizeof(int) + 2 * (size_t)population * sizeof(long long) +
+                              masks_count * sizeof(uint32_t) + (use_k2 ? (size_t)n * sizeof(int) : 0) +
+                              (use_k3 ? labels_count * sizeof(unsigned long long) : 0) +
+                              sizeof(unsigned long long) + sizeof(int);
+  size_t free_bytes = 0;
+  size_t total_bytes = 0;
+  CC_CUDA_CHECK(cudaMemGetInfo(&free_bytes, &total_bytes));
+  if (device_bytes > free_bytes) {
+    throw std::runtime_error("run needs " + Mebibytes(device_bytes) + " of device memory, " + Mebibytes(free_bytes) +
+                             " free");
+  }
+  if (params.verbose) {
+    std::printf("  device memory: %s of %s free\n", Mebibytes(device_bytes).c_str(), Mebibytes(free_bytes).c_str());
+  }
+
+  DeviceArena<GainT> arena;
   CC_CUDA_CHECK(cudaMalloc(&arena.bits, bits_bytes));
   CC_CUDA_CHECK(cudaMemcpy(arena.bits, graph.Bits().data(), bits_bytes, cudaMemcpyHostToDevice));
   CC_CUDA_CHECK(cudaMalloc(&arena.labels, labels_count * sizeof(int)));
   CC_CUDA_CHECK(cudaMalloc(&arena.labels_next, labels_count * sizeof(int)));
-  CC_CUDA_CHECK(cudaMalloc(&arena.g, g_count * sizeof(Gain)));
-  CC_CUDA_CHECK(cudaMalloc(&arena.g_next, g_count * sizeof(Gain)));
+  CC_CUDA_CHECK(cudaMalloc(&arena.g, g_count * sizeof(GainT)));
+  CC_CUDA_CHECK(cudaMalloc(&arena.g_next, g_count * sizeof(GainT)));
   CC_CUDA_CHECK(cudaMalloc(&arena.sizes, sizes_count * sizeof(int)));
   CC_CUDA_CHECK(cudaMalloc(&arena.sizes_next, sizes_count * sizeof(int)));
   CC_CUDA_CHECK(cudaMalloc(&arena.f, population * sizeof(long long)));
   CC_CUDA_CHECK(cudaMalloc(&arena.f_next, population * sizeof(long long)));
-  CC_CUDA_CHECK(cudaMalloc(&arena.masks, masks_count * sizeof(uint32_t)));
+  if (masks_count > 0) CC_CUDA_CHECK(cudaMalloc(&arena.masks, masks_count * sizeof(uint32_t)));
   CC_CUDA_CHECK(cudaMalloc(&arena.moves, sizeof(unsigned long long)));
   CC_CUDA_CHECK(cudaMemset(arena.moves, 0, sizeof(unsigned long long)));
+  CC_CUDA_CHECK(cudaMalloc(&arena.next_individual, sizeof(int)));
+  if (use_k3) CC_CUDA_CHECK(cudaMalloc(&arena.work, labels_count * sizeof(unsigned long long)));
 
-  const int init_blocks = (int)((labels_count + kBlockSize - 1) / kBlockSize);
-  KernelInitLabels<<<init_blocks, kBlockSize>>>((int)labels_count, k, arena.labels,
-                                                StreamSeed(params.seed, 0xA11CEull, 0));
+  // На широком пути сетка поэлементных ядер ограничена: индекс блока * размер блока считается в 32 битах, а
+  // цикл с шагом сетки и так пройдёт все метки (поток ГПСЧ метки от сетки не зависит).
+  const int init_blocks = (int)std::min<size_t>((labels_count + kBlockSize - 1) / kBlockSize,
+                                                kWide ? (size_t)1 << 16 : (size_t)INT_MAX);
+  KernelInitLabels<Index><<<init_blocks, kBlockSize>>>((Index)labels_count, k, arena.labels,
+                                                       StreamSeed(params.seed, 0xA11CEull, 0));
   CC_CUDA_CHECK(cudaGetLastError());
   if (use_k2) {
     CC_CUDA_CHECK(cudaMalloc(&arena.degrees, n * sizeof(int)));
@@ -730,11 +1156,11 @@ PbilsResult SolveGpu(const Graph& graph, const PbilsParams& params) {
   }
   auto rebuild = [&]() {
     if (use_k2) {
-      KernelRebuild2<<<population, kBlockSize>>>(arena.bits, words, n, arena.degrees, arena.labels, arena.g,
-                                                 arena.sizes, arena.f, edges);
+      LaunchRebuild2(population, mask_bytes, arena.bits, words, n, arena.degrees, arena.labels, arena.g, arena.sizes,
+                     arena.f, edges);
     } else {
-      KernelRebuild<<<population, kBlockSize>>>(arena.bits, words, n, k, arena.labels, arena.g, arena.sizes,
-                                                arena.f, arena.masks, edges);
+      KernelRebuild<GainT><<<population, kBlockSize>>>(arena.bits, words, n, k, arena.labels, arena.g, arena.sizes,
+                                                       arena.f, arena.masks, edges);
     }
     CC_CUDA_CHECK(cudaGetLastError());
   };
@@ -763,10 +1189,10 @@ PbilsResult SolveGpu(const Graph& graph, const PbilsParams& params) {
 
   int stall = 0;
   for (int iteration = 0; iteration < params.iterations; ++iteration) {
-    KernelSelect<<<population, kBlockSize>>>(n, k, population, params.tournament, arena.labels, arena.g,
-                                             arena.sizes, arena.f, arena.labels_next, arena.g_next,
-                                             arena.sizes_next, arena.f_next,
-                                             StreamSeed(params.seed, 0x5E1EC7ull, 0), iteration);
+    KernelSelect<GainT><<<population, kBlockSize>>>(n, k, population, params.tournament, arena.labels, arena.g,
+                                                    arena.sizes, arena.f, arena.labels_next, arena.g_next,
+                                                    arena.sizes_next, arena.f_next,
+                                                    StreamSeed(params.seed, 0x5E1EC7ull, 0), iteration);
     CC_CUDA_CHECK(cudaGetLastError());
     std::swap(arena.labels, arena.labels_next);
     std::swap(arena.g, arena.g_next);
@@ -774,11 +1200,16 @@ PbilsResult SolveGpu(const Graph& graph, const PbilsParams& params) {
     std::swap(arena.f, arena.f_next);
 
     if (use_k2) {
-      DispatchLocalSearch2(population, arena.bits, words, n, arena.labels, arena.g, arena.sizes,
-                           arena.f, arena.moves);
+      DispatchLocalSearch2(ls_blocks, population, arena.bits, words, n, arena.degrees, arena.labels, arena.g,
+                           arena.sizes, arena.f, arena.moves, arena.next_individual);
+    } else if (use_k3) {
+      LaunchLocalSearch3(ls_blocks, population, arena.bits, words, n, arena.labels, arena.g, arena.sizes, arena.f,
+                         arena.work, arena.moves, arena.next_individual);
     } else if (use_shared) {
-      LaunchLocalSearch<true>(ls_threads, population, shared_bytes, arena.bits, words, n, k, arena.labels,
-                              arena.g, arena.sizes, arena.f, arena.moves);
+      if constexpr (!kWide) {
+        LaunchLocalSearch<true>(ls_threads, population, shared_bytes, arena.bits, words, n, k, arena.labels,
+                                arena.g, arena.sizes, arena.f, arena.moves);
+      }
     } else {
       LaunchLocalSearch<false>(ls_threads, population, 0, arena.bits, words, n, k, arena.labels, arena.g,
                                arena.sizes, arena.f, arena.moves);
@@ -799,9 +1230,9 @@ PbilsResult SolveGpu(const Graph& graph, const PbilsParams& params) {
     if (params.time_limit_sec > 0.0 && SecondsSince(started) >= params.time_limit_sec) break;
 
     if (k >= 2 && params.perturbation > 0.0) {
-      KernelPerturb<<<init_blocks, kBlockSize>>>((int)labels_count, k, (float)params.perturbation,
-                                                 arena.labels, StreamSeed(params.seed, 0xBEEFull, 0),
-                                                 iteration);
+      KernelPerturb<Index><<<init_blocks, kBlockSize>>>((Index)labels_count, k, (float)params.perturbation,
+                                                        arena.labels, StreamSeed(params.seed, 0xBEEFull, 0),
+                                                        iteration);
       CC_CUDA_CHECK(cudaGetLastError());
       rebuild();
     }
@@ -815,6 +1246,24 @@ PbilsResult SolveGpu(const Graph& graph, const PbilsParams& params) {
   result.seconds = SecondsSince(started);
   result.clusters_used = CountClustersUsed(result.labels, k);
   return result;
+}
+
+}  // namespace
+
+PbilsResult SolveGpu(const Graph& graph, const PbilsParams& params) {
+  if (params.k < 1) throw std::runtime_error("k must be >= 1");
+  if (params.k > kMaxClusters) {
+    throw std::runtime_error("k exceeds kMaxClusters (" + std::to_string(kMaxClusters) +
+                             "); raise it in cc_gpu.hpp and rebuild");
+  }
+  if (params.population < 1) throw std::runtime_error("population must be >= 1");
+  if ((int)graph.Size() > kMaxVerticesWide) {
+    throw std::runtime_error("n exceeds " + std::to_string(kMaxVerticesWide) + ", the range of the packed move");
+  }
+  // Широкий путь включается сам, когда 16-битных G не хватает; --ls-kernel wide включает его и на малом
+  // графе, чтобы оба пути можно было сравнить на одном инстансе.
+  const bool wide = (int)graph.Size() > kMaxVerticesForGain || params.ls_kernel == PbilsParams::kLocalSearchWide;
+  return wide ? Solve<WideGain>(graph, params) : Solve<Gain>(graph, params);
 }
 
 }  // namespace cc

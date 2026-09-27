@@ -1,5 +1,6 @@
 #include "cc_pbils.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -117,6 +118,47 @@ long long ObjectiveDirect(const Graph& graph, const std::vector<int>& labels) {
     }
   }
   return distance;
+}
+
+long long ObjectiveBitwise(const Graph& graph, const std::vector<int>& labels) {
+  const unsigned n = graph.Size();
+  if (labels.size() != n) throw std::runtime_error("labels length != graph size");
+  const unsigned words = graph.WordsPerRow();
+  int k = 0;
+  for (const int label : labels) {
+    if (label < 0) throw std::runtime_error("negative label");
+    k = std::max(k, label + 1);
+  }
+  std::vector<Word> masks((size_t)k * words, 0u);
+  for (unsigned v = 0; v < n; ++v) masks[(size_t)labels[v] * words + v / kWordBits] |= 1u << (v % kWordBits);
+
+  // Строки раздаются порциями, как слоты в WorkerPool: пул ради одного прохода не нужен.
+  constexpr unsigned kChunk = 256;
+  const int workers = std::max(1, (int)std::thread::hardware_concurrency());
+  std::vector<long long> sums(workers, 0);
+  std::atomic<unsigned> next{0};
+  auto work = [&](int worker) {
+    long long acc = 0;
+    for (unsigned begin = next.fetch_add(kChunk); begin < n; begin = next.fetch_add(kChunk)) {
+      const unsigned end = std::min(n, begin + kChunk);
+      for (unsigned v = begin; v < end; ++v) {
+        const Word* row = graph.Row(v);
+        const Word* mask = masks.data() + (size_t)labels[v] * words;
+        long long disagreements = 0;
+        for (unsigned w = 0; w < words; ++w) disagreements += PopCount(row[w] ^ mask[w]);
+        acc += disagreements - 1;  // бит самой вершины: в маске он стоит, в строке нет
+      }
+    }
+    sums[worker] = acc;
+  };
+  std::vector<std::thread> threads;
+  for (int worker = 1; worker < workers; ++worker) threads.emplace_back(work, worker);
+  work(0);
+  for (std::thread& thread : threads) thread.join();
+
+  long long total = 0;
+  for (const long long sum : sums) total += sum;
+  return total / 2;  // каждая пара посчитана с обеих сторон
 }
 
 int CountClustersUsed(const std::vector<int>& labels, int k) {

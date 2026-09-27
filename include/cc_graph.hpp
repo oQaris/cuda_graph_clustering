@@ -48,6 +48,13 @@ class Graph {
   static Graph LoadBaselineJson(const std::string& path);
   void SaveBaselineJson(const std::string& path) const;
 
+  // Граф по тегам, как его строит TagsGraphFactory бейзлайна из data/Tags_*.json: объект -> список
+  // тегов, ребро между двумя объектами, если мера сходства их наборов тегов (jaccard, cosine, dice или
+  // overlap) не ниже порога. Берётся n случайных объектов без повторов (сид seed); n = 0 или n не
+  // меньше числа объектов берёт все в порядке файла.
+  static Graph LoadTags(const std::string& path, const std::string& similarity, double threshold, unsigned n,
+                        uint64_t seed);
+
  private:
   unsigned n_ = 0;
   unsigned words_per_row_ = 0;

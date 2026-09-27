@@ -2,8 +2,14 @@
 //   f = m + sum_c C(n_c,2) - 2W
 // и дельта хода общие с ядрами CUDA, поэтому доказательство здесь доказывает
 // и арифметику, на которую опирается GPU.
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <fstream>
+#include <iterator>
+#include <numeric>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -269,6 +275,102 @@ void TestMoreClustersDoNotHurt() {
   }
 }
 
+// 8. Пересчёт по словам строк, которым проверяются большие графы, должен совпадать с попарным и на
+//    размерах вокруг границы слова, где мешают биты дополнения.
+void TestBitwiseObjective() {
+  std::printf("bitwise objective vs pairwise definition\n");
+  uint64_t rng = 31337;
+  for (const unsigned n : {1u, 2u, 31u, 32u, 33u, 63u, 64u, 65u, 200u, 517u}) {
+    for (const double density : {0.0, 0.3, 0.8, 1.0}) {
+      for (const int k : {1, 2, 3, 7}) {
+        const cc::Graph graph = cc::Graph::ErdosRenyi(n, density, cc::NextU32(rng));
+        std::vector<int> labels(n);
+        for (unsigned v = 0; v < n; ++v) labels[v] = static_cast<int>(cc::RandBelow(rng, static_cast<unsigned>(k)));
+        CheckEq(cc::ObjectiveBitwise(graph, labels), cc::ObjectiveDirect(graph, labels),
+                "n=" + std::to_string(n) + " p=" + std::to_string(density) + " k=" + std::to_string(k));
+      }
+    }
+  }
+}
+
+// Сходство наборов тегов ровно так, как его считает TagsGraphFactory::Chance оригинала: через std::set
+// строк и те же формулы в double.
+double ChanceLikeBaseline(const std::string& kind, const std::vector<std::string>& a,
+                          const std::vector<std::string>& b) {
+  const std::set<std::string> set_1(a.begin(), a.end());
+  const std::set<std::string> set_2(b.begin(), b.end());
+  std::set<std::string> inter;
+  std::set_intersection(set_1.begin(), set_1.end(), set_2.begin(), set_2.end(), std::inserter(inter, inter.begin()));
+  std::set<std::string> uni;
+  std::set_union(set_1.begin(), set_1.end(), set_2.begin(), set_2.end(), std::inserter(uni, uni.begin()));
+  const double i = static_cast<double>(inter.size());
+  const double s1 = static_cast<double>(set_1.size());
+  const double s2 = static_cast<double>(set_2.size());
+  if (kind == "jaccard") return i / static_cast<double>(uni.size());
+  if (kind == "cosine") return i / std::sqrt(s1 * s2);
+  if (kind == "dice") return 2.0 * i / (s1 + s2);
+  return i / std::min(s1, s2);
+}
+
+// 9. Граф по тегам должен совпадать с попарным построением оригинала: при любой мере и пороге, с пустыми
+//    наборами, повторами тегов, экранированием в строках и на выборке объектов.
+void TestTagsGraph() {
+  std::printf("tags graph vs pairwise construction\n");
+  const std::vector<std::vector<std::string>> objects = {
+      {"a"}, {"a", "b"}, {"b", "a", "a"}, {"c"}, {}, {"a", "b", "c"}, {"d"}, {"a"}, {"b", "c"},
+      {"q\"x"}, {"a", "c", "d", "e"}, {"e"}, {"a", "b"}, {}, {"c", "d"}, {"q\"x", "a"}};
+  const std::string path = TempPath("cc_verify_tags.json");
+  {
+    std::ofstream out(path);
+    out << "{\n";
+    for (size_t i = 0; i < objects.size(); ++i) {
+      out << "  \"" << 1000 + i * 7 << "\": [";
+      for (size_t t = 0; t < objects[i].size(); ++t) {
+        std::string escaped;
+        for (const char ch : objects[i][t]) {
+          if (ch == '"' || ch == '\\') escaped += '\\';
+          escaped += ch;
+        }
+        out << (t ? ", " : "") << "\"" << escaped << "\"";
+      }
+      out << "]" << (i + 1 != objects.size() ? "," : "") << "\n";
+    }
+    out << "}\n";
+  }
+
+  const unsigned total = static_cast<unsigned>(objects.size());
+  for (const char* kind : {"jaccard", "cosine", "dice", "overlap"}) {
+    for (const double threshold : {0.25, 0.5, 0.75, 1.0}) {
+      for (const unsigned n : {0u, 9u}) {
+        // Та же выборка, что в Graph::LoadTags: частичное перемешивание Фишера-Йетса по сиду графа.
+        std::vector<unsigned> chosen(total);
+        std::iota(chosen.begin(), chosen.end(), 0u);
+        if (n != 0) {
+          uint64_t state = cc::StreamSeed(42, 0x7A65ull, 0);
+          for (unsigned i = 0; i < n; ++i) std::swap(chosen[i], chosen[i + cc::RandBelow(state, total - i)]);
+          chosen.resize(n);
+        }
+        const cc::Graph graph = cc::Graph::LoadTags(path, kind, threshold, n, 42);
+        const std::string what = std::string(kind) + " t=" + std::to_string(threshold) + " n=" + std::to_string(n);
+        CheckEq(graph.Size(), static_cast<long long>(chosen.size()), what + " size");
+        long long edges = 0;
+        bool same = true;
+        for (unsigned i = 0; i < chosen.size(); ++i) {
+          same = same && !graph.IsJoined(i, i);
+          for (unsigned j = i + 1; j < chosen.size(); ++j) {
+            const bool want = ChanceLikeBaseline(kind, objects[chosen[i]], objects[chosen[j]]) >= threshold;
+            same = same && graph.IsJoined(i, j) == want && graph.IsJoined(j, i) == want;
+            edges += want;
+          }
+        }
+        Check(same, what + " adjacency");
+        CheckEq(static_cast<long long>(graph.EdgeCount()), edges, what + " edges");
+      }
+    }
+  }
+  std::remove(path.c_str());
+}
+
 }  // namespace
 
 int main() {
@@ -279,6 +381,8 @@ int main() {
   TestGraphIo();
   TestSolverReportsTruth();
   TestMoreClustersDoNotHurt();
+  TestBitwiseObjective();
+  TestTagsGraph();
 
   std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
   return g_failures == 0 ? 0 : 1;
