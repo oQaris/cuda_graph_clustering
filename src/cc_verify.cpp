@@ -345,6 +345,30 @@ void TestTagsGraph() {
   std::remove(path.c_str());
 }
 
+// 10. Список рёбер: комментарии, заголовок CSV, разделители, лишние столбцы, повторы, обратные рёбра, петли,
+//     разреженные номера и CRLF.
+void TestEdgeList() {
+  std::printf("edge list loader\n");
+  const std::string path = TempPath("cc_verify_edges.txt");
+  {
+    std::ofstream out(path, std::ios::binary);
+    out << "# comment\n% another\nid_1,id_2\n10 20\n20 10\n10,30\r\n30\t40 7.5\n40 40\n\n1000 10 1690000000\n";
+  }
+  const cc::Graph graph = cc::Graph::LoadEdgeList(path);
+  CheckEq(graph.Size(), 5, "edge list: vertices are the distinct ids");
+  CheckEq(static_cast<long long>(graph.EdgeCount()), 4, "edge list: duplicates and loops dropped");
+  // Номера 10, 20, 30, 40, 1000 -> вершины 0..4.
+  const std::set<std::pair<unsigned, unsigned>> want = {{0, 1}, {0, 2}, {2, 3}, {0, 4}};
+  bool same = true;
+  for (unsigned i = 0; i < graph.Size(); ++i) {
+    for (unsigned j = 0; j < graph.Size(); ++j) {
+      same = same && graph.IsJoined(i, j) == (want.count({std::min(i, j), std::max(i, j)}) > 0);
+    }
+  }
+  Check(same, "edge list: adjacency");
+  std::remove(path.c_str());
+}
+
 }  // namespace
 
 int main() {
@@ -357,6 +381,7 @@ int main() {
   TestMoreClustersDoNotHurt();
   TestBitwiseObjective();
   TestTagsGraph();
+  TestEdgeList();
 
   std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
   return g_failures == 0 ? 0 : 1;

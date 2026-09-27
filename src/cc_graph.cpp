@@ -267,6 +267,44 @@ void Graph::SaveBaselineJson(const std::string& path) const {
   out << "]\n}\n";
 }
 
+// Номера вершин в файле любые: вершина графа — ранг номера среди всех встреченных. Разбор вручную, а не потоком:
+// у крупных графов в файле сотни миллионов чисел.
+Graph Graph::LoadEdgeList(const std::string& path) {
+  const std::string text = ReadWholeFile(path);
+  std::vector<uint64_t> ends;  // концы рёбер парами
+  size_t pos = 0;
+  auto read_id = [&](uint64_t& id) {
+    while (pos < text.size() && (text[pos] == ' ' || text[pos] == '\t' || text[pos] == ',')) ++pos;
+    if (pos >= text.size() || !std::isdigit((unsigned char)text[pos])) return false;
+    for (id = 0; pos < text.size() && std::isdigit((unsigned char)text[pos]); ++pos) {
+      if (id > (UINT64_MAX - 9) / 10) throw std::runtime_error("vertex id does not fit 64 bits in " + path);
+      id = id * 10 + (uint64_t)(text[pos] - '0');
+    }
+    return true;
+  };
+  while (pos < text.size()) {
+    const size_t line_end = std::min(text.find('\n', pos), text.size());
+    uint64_t u = 0;
+    uint64_t v = 0;
+    // Комментарии и строки не с числа (заголовок CSV) пропускаются, остаток строки после двух номеров — тоже.
+    if (text[pos] != '#' && text[pos] != '%' && read_id(u) && read_id(v)) {
+      ends.push_back(u);
+      ends.push_back(v);
+    }
+    pos = line_end + 1;
+  }
+  if (ends.empty()) throw std::runtime_error("no edges in " + path);
+
+  std::vector<uint64_t> ids(ends);
+  std::sort(ids.begin(), ids.end());
+  ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
+  if (ids.size() > UINT32_MAX) throw std::runtime_error("too many vertices in " + path);
+  auto rank = [&](uint64_t id) { return (unsigned)(std::lower_bound(ids.begin(), ids.end(), id) - ids.begin()); };
+  Graph g = EmptyGraph((unsigned)ids.size(), "");
+  for (size_t i = 0; i < ends.size(); i += 2) g.AddEdge(rank(ends[i]), rank(ends[i + 1]));  // петли AddEdge отбросит
+  return g;
+}
+
 // Граф строится не перебором пар, а по классам: у объектов с одинаковым набором тегов одинаковые строки матрицы (кроме
 // бита на диагонали), поэтому строка считается один раз на класс и копируется каждому его объекту. Матрица выходит та
 // же, что у попарного построения оригинала, но на всём датасете это секунды, а не часы.

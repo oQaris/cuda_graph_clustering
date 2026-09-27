@@ -24,6 +24,7 @@ struct Options {
   uint64_t graph_seed = 1;
   std::string graph_path;
   std::string graph_json_path;
+  std::string edges_path;
   std::string save_graph_path;
   std::string save_graph_json_path;
   std::string tags_path;
@@ -119,6 +120,8 @@ inline std::vector<Section> Flags(Options& o) {
            Option("--graph-seed", "S", "сид генератора, фиксирует инстанс", o.graph_seed),
            Option("--graph", "PATH", "загрузить матрицу вместо генерации", o.graph_path),
            Option("--graph-json", "PATH", "загрузить блок \"graph\" из файла результата бейзлайна", o.graph_json_path),
+           Option("--edges", "PATH", "загрузить список рёбер (SNAP, CSV): номера вершин любые, вершина — их ранг",
+                  o.edges_path),
            Option("--save-graph", "PATH", "сохранить инстанс как обычную матрицу", o.save_graph_path),
            Option("--save-graph-json", "PATH", "сохранить инстанс в формате JSON бейзлайна", o.save_graph_json_path),
            Option("--tags", "PATH",
@@ -218,6 +221,7 @@ inline Graph LoadInstance(const Options& options) {
     return Graph::LoadTags(options.tags_path, options.similarity, options.threshold, options.n, options.graph_seed);
   }
   if (!options.graph_json_path.empty()) return Graph::LoadBaselineJson(options.graph_json_path);
+  if (!options.edges_path.empty()) return Graph::LoadEdgeList(options.edges_path);
   if (!options.graph_path.empty()) return Graph::LoadMatrix(options.graph_path);
   return Graph::ErdosRenyi(options.n, options.density, options.graph_seed);
 }

@@ -40,6 +40,11 @@ class Graph {
   static Graph LoadBaselineJson(const std::string& path);
   void SaveBaselineJson(const std::string& path) const;
 
+  // Список рёбер, как у SNAP и в CSV: строка — два номера вершин через пробел, табуляцию или запятую, остальное в
+  // строке (вес, время) не читается; строки с '#', '%' и не с числа пропускаются. Направление, петли и повторы
+  // теряются.
+  static Graph LoadEdgeList(const std::string& path);
+
   // Граф по тегам, как его строит TagsGraphFactory бейзлайна из data/Tags_*.json: объект -> список тегов, ребро между
   // объектами, если мера сходства их наборов тегов (jaccard, cosine, dice или overlap) не ниже порога. Вершины —
   // SampleWithoutReplacement(объектов, n, seed).
