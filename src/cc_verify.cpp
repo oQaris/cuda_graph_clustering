@@ -1,16 +1,15 @@
-// Проверки корректности инкрементальной целевой функции. Формула
-//   f = m + sum_c C(n_c,2) - 2W
-// и дельта хода общие с ядрами CUDA, поэтому доказательство здесь доказывает
-// и арифметику, на которую опирается GPU.
+// Проверки инкрементальной целевой функции. Формула f = m + sum_c C(n_c,2) - 2W и дельта хода общие с ядрами CUDA,
+// так что проверка здесь проверяет и арифметику GPU.
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
 #include <iterator>
-#include <numeric>
 #include <set>
+#include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "cc_graph.hpp"
@@ -19,8 +18,7 @@
 
 namespace {
 
-// Временные файлы должны попадать туда, что существует на любой платформе:
-// /tmp нет в Windows, поэтому используем собственные переменные окружения.
+// Временные файлы — туда, что есть на любой платформе: /tmp в Windows нет.
 std::string TempPath(const char* name) {
   for (const char* variable : {"TMPDIR", "TEMP", "TMP"}) {
     if (const char* dir = std::getenv(variable)) {
@@ -51,6 +49,15 @@ void CheckEq(long long got, long long want, const std::string& what) {
   }
 }
 
+// Состояние со случайными метками и пересчитанной G.
+cc::State RandomState(const cc::Graph& graph, int k, uint64_t& rng) {
+  cc::State state;
+  state.Init(static_cast<int>(graph.Size()), k);
+  for (int& label : state.labels) label = static_cast<int>(cc::RandBelow(rng, static_cast<unsigned>(k)));
+  state.Rebuild(graph);
+  return state;
+}
+
 // 1. Замкнутая формула целевой функции должна совпадать с попарным подсчётом при любом k.
 void TestObjectiveMatchesDefinition() {
   std::printf("objective formula vs pairwise definition\n");
@@ -59,15 +66,9 @@ void TestObjectiveMatchesDefinition() {
     for (const double density : {0.0, 0.15, 0.5, 0.9, 1.0}) {
       for (const int k : {1, 2, 3, 5, 9}) {
         const cc::Graph graph = cc::Graph::ErdosRenyi(n, density, cc::NextU32(rng));
-        cc::State state;
-        state.Init(static_cast<int>(n), k);
-        for (unsigned v = 0; v < n; ++v) {
-          state.labels[v] = static_cast<int>(cc::RandBelow(rng, static_cast<unsigned>(k)));
-        }
-        state.Rebuild(graph);
+        const cc::State state = RandomState(graph, k, rng);
         CheckEq(state.f, cc::ObjectiveDirect(graph, state.labels),
-                "n=" + std::to_string(n) + " p=" + std::to_string(density) +
-                    " k=" + std::to_string(k));
+                "n=" + std::to_string(n) + " p=" + std::to_string(density) + " k=" + std::to_string(k));
       }
     }
   }
@@ -80,12 +81,7 @@ void TestIncrementalMovesStayExact() {
   for (const unsigned n : {2u, 5u, 31u, 96u}) {
     for (const int k : {2, 3, 7}) {
       const cc::Graph graph = cc::Graph::ErdosRenyi(n, 0.45, cc::NextU32(rng));
-      cc::State state;
-      state.Init(static_cast<int>(n), k);
-      for (unsigned v = 0; v < n; ++v) {
-        state.labels[v] = static_cast<int>(cc::RandBelow(rng, static_cast<unsigned>(k)));
-      }
-      state.Rebuild(graph);
+      cc::State state = RandomState(graph, k, rng);
 
       for (int step = 0; step < 200; ++step) {
         const int v = static_cast<int>(cc::RandBelow(rng, n));
@@ -100,8 +96,8 @@ void TestIncrementalMovesStayExact() {
 
         CheckEq(state.f, fresh.f, "f after move");
         CheckEq(state.f, cc::ObjectiveDirect(graph, state.labels), "f vs definition");
-        bool g_equal = state.g == fresh.g;
-        bool sizes_equal = state.sizes == fresh.sizes;
+        const bool g_equal = state.g == fresh.g;
+        const bool sizes_equal = state.sizes == fresh.sizes;
         Check(g_equal, "G after move (n=" + std::to_string(n) + " k=" + std::to_string(k) + ")");
         Check(sizes_equal, "sizes after move");
         if (!g_equal || !sizes_equal) return;
@@ -117,12 +113,7 @@ void TestLocalSearchDescends() {
   for (const unsigned n : {4u, 23u, 80u, 210u}) {
     for (const int k : {2, 3, 4}) {
       const cc::Graph graph = cc::Graph::ErdosRenyi(n, 0.35, cc::NextU32(rng));
-      cc::State state;
-      state.Init(static_cast<int>(n), k);
-      for (unsigned v = 0; v < n; ++v) {
-        state.labels[v] = static_cast<int>(cc::RandBelow(rng, static_cast<unsigned>(k)));
-      }
-      state.Rebuild(graph);
+      cc::State state = RandomState(graph, k, rng);
       const long long before = state.f;
 
       long long moves = 0;
@@ -143,20 +134,14 @@ void TestKnownOptima() {
   // Полный граф — уже один кластер: разногласий нет.
   for (const unsigned n : {2u, 6u, 33u}) {
     const cc::Graph graph = cc::Graph::ErdosRenyi(n, 1.0, 1);
-    cc::State state;
-    state.Init(static_cast<int>(n), 3);
     uint64_t rng = 5;
-    for (unsigned v = 0; v < n; ++v) {
-      state.labels[v] = static_cast<int>(cc::RandBelow(rng, 3));
-    }
-    state.Rebuild(graph);
+    cc::State state = RandomState(graph, 3, rng);
     cc::LocalSearch(graph, state);
     CheckEq(state.f, 0, "complete graph K" + std::to_string(n) + " reaches 0");
     CheckEq(cc::CountClustersUsed(state.labels, 3), 1, "K" + std::to_string(n) + " uses one cluster");
   }
 
-  // Граф без рёбер на 4 вершинах при k = 2: лучшее разбиение 2 + 2, его
-  // стоимость C(2,2) + C(2,2) = 2.
+  // Граф без рёбер на 4 вершинах при k = 2: лучшее разбиение 2 + 2, его стоимость C(2,2) + C(2,2) = 2.
   {
     const cc::Graph graph(4);
     cc::State state;
@@ -171,8 +156,8 @@ void TestKnownOptima() {
   // Два непересекающихся треугольника: k=2 разделяет их бесплатно.
   {
     cc::Graph graph(6);
-    graph.AddEdge(0, 1); graph.AddEdge(1, 2); graph.AddEdge(0, 2);
-    graph.AddEdge(3, 4); graph.AddEdge(4, 5); graph.AddEdge(3, 5);
+    const std::pair<unsigned, unsigned> edges[] = {{0, 1}, {1, 2}, {0, 2}, {3, 4}, {4, 5}, {3, 5}};
+    for (const auto& [from, to] : edges) graph.AddEdge(from, to);
     cc::State state;
     state.Init(6, 2);
     state.labels = {0, 1, 0, 1, 0, 1};
@@ -207,16 +192,14 @@ void TestGraphIo() {
 
   CheckEq(from_matrix.Size(), graph.Size(), "matrix round trip size");
   CheckEq(from_json.Size(), graph.Size(), "json round trip size");
-  CheckEq(static_cast<long long>(from_matrix.EdgeCount()),
-          static_cast<long long>(graph.EdgeCount()), "matrix round trip edges");
-  CheckEq(static_cast<long long>(from_json.EdgeCount()),
-          static_cast<long long>(graph.EdgeCount()), "json round trip edges");
+  const long long edges = static_cast<long long>(graph.EdgeCount());
+  CheckEq(static_cast<long long>(from_matrix.EdgeCount()), edges, "matrix round trip edges");
+  CheckEq(static_cast<long long>(from_json.EdgeCount()), edges, "json round trip edges");
 
   bool same = true;
   for (unsigned i = 0; i < graph.Size() && same; ++i) {
     for (unsigned j = 0; j < graph.Size(); ++j) {
-      if (graph.IsJoined(i, j) != from_matrix.IsJoined(i, j) ||
-          graph.IsJoined(i, j) != from_json.IsJoined(i, j)) {
+      if (graph.IsJoined(i, j) != from_matrix.IsJoined(i, j) || graph.IsJoined(i, j) != from_json.IsJoined(i, j)) {
         same = false;
         break;
       }
@@ -239,8 +222,7 @@ void TestSolverReportsTruth() {
     params.early_stop = 4;
     params.seed = 7;
     const cc::PbilsResult result = cc::SolveCpu(graph, params);
-    CheckEq(result.objective, cc::ObjectiveDirect(graph, result.labels),
-            "reported objective, k=" + std::to_string(k));
+    CheckEq(result.objective, cc::ObjectiveDirect(graph, result.labels), "reported objective, k=" + std::to_string(k));
     Check(result.clusters_used >= 1 && result.clusters_used <= k, "clusters used within bound");
   }
 }
@@ -249,18 +231,13 @@ void TestSolverReportsTruth() {
 //    лишь расширяет пространство поиска.
 void TestMoreClustersDoNotHurt() {
   std::printf("edgeless graph: optimum follows the balanced split\n");
-  // Для графа без рёбер целевая функция — ровно sum_c C(n_c,2), минимум даёт самое сбалансированное
-  // разбиение; с ним и сравниваем в замкнутой форме.
+  // Для графа без рёбер целевая функция — ровно sum_c C(n_c,2), минимум даёт самое сбалансированное разбиение; с ним и
+  // сравниваем в замкнутой форме.
   for (const unsigned n : {6u, 9u, 12u}) {
     for (const int k : {2, 3, 4}) {
       const cc::Graph graph(n);
-      cc::State state;
-      state.Init(static_cast<int>(n), k);
       uint64_t rng = n * 31 + k;
-      for (unsigned v = 0; v < n; ++v) {
-        state.labels[v] = static_cast<int>(cc::RandBelow(rng, static_cast<unsigned>(k)));
-      }
-      state.Rebuild(graph);
+      cc::State state = RandomState(graph, k, rng);
       cc::LocalSearch(graph, state);
 
       const int base = static_cast<int>(n) / k;
@@ -293,8 +270,8 @@ void TestBitwiseObjective() {
   }
 }
 
-// Сходство наборов тегов ровно так, как его считает TagsGraphFactory::Chance оригинала: через std::set
-// строк и те же формулы в double.
+// Сходство наборов тегов ровно так, как его считает TagsGraphFactory::Chance оригинала: через std::set строк и те же
+// формулы в double.
 double ChanceLikeBaseline(const std::string& kind, const std::vector<std::string>& a,
                           const std::vector<std::string>& b) {
   const std::set<std::string> set_1(a.begin(), a.end());
@@ -316,9 +293,13 @@ double ChanceLikeBaseline(const std::string& kind, const std::vector<std::string
 //    наборами, повторами тегов, экранированием в строках и на выборке объектов.
 void TestTagsGraph() {
   std::printf("tags graph vs pairwise construction\n");
-  const std::vector<std::vector<std::string>> objects = {
-      {"a"}, {"a", "b"}, {"b", "a", "a"}, {"c"}, {}, {"a", "b", "c"}, {"d"}, {"a"}, {"b", "c"},
-      {"q\"x"}, {"a", "c", "d", "e"}, {"e"}, {"a", "b"}, {}, {"c", "d"}, {"q\"x", "a"}};
+  // Теги объекта через пробел: пустые наборы, повторы, кавычка внутри тега.
+  std::vector<std::vector<std::string>> objects;
+  for (const char* tags :
+       {"a", "a b", "b a a", "c", "", "a b c", "d", "a", "b c", "q\"x", "a c d e", "e", "a b", "", "c d", "q\"x a"}) {
+    std::istringstream in(tags);
+    objects.emplace_back(std::istream_iterator<std::string>(in), std::istream_iterator<std::string>());
+  }
   const std::string path = TempPath("cc_verify_tags.json");
   {
     std::ofstream out(path);
@@ -342,14 +323,7 @@ void TestTagsGraph() {
   for (const char* kind : {"jaccard", "cosine", "dice", "overlap"}) {
     for (const double threshold : {0.25, 0.5, 0.75, 1.0}) {
       for (const unsigned n : {0u, 9u}) {
-        // Та же выборка, что в Graph::LoadTags: частичное перемешивание Фишера-Йетса по сиду графа.
-        std::vector<unsigned> chosen(total);
-        std::iota(chosen.begin(), chosen.end(), 0u);
-        if (n != 0) {
-          uint64_t state = cc::StreamSeed(42, 0x7A65ull, 0);
-          for (unsigned i = 0; i < n; ++i) std::swap(chosen[i], chosen[i + cc::RandBelow(state, total - i)]);
-          chosen.resize(n);
-        }
+        const std::vector<unsigned> chosen = cc::SampleWithoutReplacement(total, n, 42);
         const cc::Graph graph = cc::Graph::LoadTags(path, kind, threshold, n, 42);
         const std::string what = std::string(kind) + " t=" + std::to_string(threshold) + " n=" + std::to_string(n);
         CheckEq(graph.Size(), static_cast<long long>(chosen.size()), what + " size");

@@ -1,9 +1,6 @@
-// Неориентированный невзвешенный граф в виде битовой матрицы смежности.
-//
-// Строки дополнены до целого числа 32-битных слов, чтобы пересекать строку с маской кластера и
-// считать совпадения через popcount. Это и есть битовая форма произведения A*Z: для невзвешенного
-// графа она сводит 32 попарных сравнения к одной инструкции — именно отсюда ускорение
-// относительно попарного цикла на CPU.
+// Неориентированный невзвешенный граф в виде битовой матрицы смежности. Строки дополнены до целого числа 32-битных
+// слов, чтобы пересекать строку с маской кластера через popcount: это битовая форма произведения A*Z, которая сводит
+// 32 попарных сравнения к одной инструкции.
 #pragma once
 
 #include <cstdint>
@@ -26,32 +23,26 @@ class Graph {
   const std::vector<Word>& Bits() const { return bits_; }
   const Word* Row(unsigned v) const { return bits_.data() + (size_t)v * words_per_row_; }
 
-  bool IsJoined(unsigned i, unsigned j) const {
-    return (Row(i)[j / kWordBits] >> (j % kWordBits)) & 1u;
-  }
+  bool IsJoined(unsigned i, unsigned j) const { return (Row(i)[j / kWordBits] >> (j % kWordBits)) & 1u; }
 
   void AddEdge(unsigned i, unsigned j);
   double Density() const;
 
-  // G(n, p) с фиксированным сидом — один и тот же инстанс можно отдать и CPU-референсу, и
-  // GPU-решателю.
+  // G(n, p) по сиду: один и тот же инстанс можно отдать и CPU, и GPU.
   static Graph ErdosRenyi(unsigned n, double density, uint64_t seed);
 
-  // Простой текст: первая строка — n, затем n строк из n символов '0'/'1' либо из значений 0/1
-  // через пробел.
+  // Текст: первая строка — n, затем n строк из n символов '0'/'1' либо значений 0/1 через пробел.
   static Graph LoadMatrix(const std::string& path);
   void SaveMatrix(const std::string& path) const;
 
-  // Блок "graph": [[0,1,...],...], который бейзлайн (BIGADIL/graph_correlation_clustering) пишет
-  // в каждый файл результата. Чтение этого блока позволяет посчитать целевую функцию на тех же
-  // инстансах, на которых гонялся бейзлайн.
+  // Блок "graph": [[0,1,...],...], который бейзлайн (BIGADIL/graph_correlation_clustering) пишет в каждый файл
+  // результата: так целевую функцию можно посчитать на тех же инстансах, на которых гонялся бейзлайн.
   static Graph LoadBaselineJson(const std::string& path);
   void SaveBaselineJson(const std::string& path) const;
 
-  // Граф по тегам, как его строит TagsGraphFactory бейзлайна из data/Tags_*.json: объект -> список
-  // тегов, ребро между двумя объектами, если мера сходства их наборов тегов (jaccard, cosine, dice или
-  // overlap) не ниже порога. Берётся n случайных объектов без повторов (сид seed); n = 0 или n не
-  // меньше числа объектов берёт все в порядке файла.
+  // Граф по тегам, как его строит TagsGraphFactory бейзлайна из data/Tags_*.json: объект -> список тегов, ребро между
+  // объектами, если мера сходства их наборов тегов (jaccard, cosine, dice или overlap) не ниже порога. Вершины —
+  // SampleWithoutReplacement(объектов, n, seed).
   static Graph LoadTags(const std::string& path, const std::string& similarity, double threshold, unsigned n,
                         uint64_t seed);
 
@@ -61,5 +52,8 @@ class Graph {
   uint64_t edges_ = 0;
   std::vector<Word> bits_;
 };
+
+// n случайных номеров из [0, total) без повторов по сиду; n = 0 или n >= total — все по порядку.
+std::vector<unsigned> SampleWithoutReplacement(unsigned total, unsigned n, uint64_t seed);
 
 }  // namespace cc

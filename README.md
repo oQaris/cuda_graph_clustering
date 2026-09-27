@@ -103,6 +103,7 @@ nvcc -O3 -std=c++17 -Iinclude --generate-code arch=compute_89,code=sm_89 ^
 # граф по тегам из данных оригинала (data/Tags_*.json): все объекты или выборка по сиду
 ./bin/cc_gpu --tags data/Tags_nus_wide.json --n 0 --similarity jaccard --threshold 0.5 --k 3
 ./bin/cc_gpu --tags data/Tags_so.json --n 330000 --graph-seed 7 --k 2
+
 ```
 
 Граф по тегам строится так же, как в `TagsGraphFactory` оригинала: ребро, если сходство
@@ -119,8 +120,8 @@ nvcc -O3 -std=c++17 -Iinclude --generate-code arch=compute_89,code=sm_89 ^
 
 * `make test` (`bin/cc_verify.exe` на Windows): 6932 проверки формулы и инкрементальных
   обновлений против определения по парам, пересчёта по словам строк против попарного и графа
-  по тегам против попарного построения оригинала. Проверки до широкого пути проходили под
-  GCC/Clang и MSVC, новые — под MSVC.
+  по тегам против попарного построения оригинала. Раньше проверки проходили и под GCC/Clang,
+  код после рефакторинга собран и проверен только под MSVC.
 * CPU и GPU при одном `--seed` дают одинаковые f и число итераций, так же и
   `--ls-kernel shared` против `--ls-kernel global`, а при k = 2 и отдельное ядро (`auto`)
   против общего.
@@ -147,12 +148,19 @@ NUS-WIDE, 193 734 вершины; 330 тысяч вершин из данных 
 ## Структура
 
 ```
-include/cc_math.hpp     целевая функция, дельта хода, ГПСЧ; общий код хоста и устройства
-include/cc_graph.hpp    граф: биты, генератор по сиду, ввод-вывод, чтение JSON оригинала
-include/cc_pbils.hpp    параметры, состояние решения, PBILS
-include/cc_gpu.hpp      объявление GPU-решателя
-include/cc_cli.hpp      общий интерфейс командной строки
-src/                    CPU-версия и тесты
-cuda/                   ядра CUDA
-docs/                   замеры: отчёт, графики, данные, скрипты
+include/cc_math.hpp             целевая функция, дельта хода, ГПСЧ; общий код хоста и устройства
+include/cc_graph.hpp            граф: биты, генератор по сиду, ввод-вывод, чтение JSON оригинала
+include/cc_pbils.hpp            параметры, состояние решения, PBILS
+include/cc_parallel.hpp         пул потоков CPU-части
+include/cc_gpu.hpp              объявление GPU-решателя
+include/cc_cli.hpp              общий интерфейс командной строки
+src/                            CPU-версия и тесты
+cuda/cc_pbils_gpu.cu            GPU-решатель: выбор ядер, память, цикл итераций
+cuda/cc_gpu_tuning.cuh          параметры запуска ядер, снятые замером
+cuda/cc_gpu_common.cuh          общее для ядер: свёртки по варпу и блоку, ключ хода
+cuda/cc_population_kernels.cuh  начальные метки, пересчёт G, селекция, возмущение
+cuda/cc_local_search*.cuh       ядра спуска: общее, для k = 2 и для k = 3
+docs/                           замеры: отчёт, графики, данные, скрипты
 ```
+
+Длина строки в коде — 120 символов, стиль задаёт `.clang-format`.

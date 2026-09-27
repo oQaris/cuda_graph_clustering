@@ -1,13 +1,14 @@
-// Общий интерфейс командной строки для CPU- и CUDA-бинарников: оба запускаются одинаково, и их
-// числа напрямую сравнимы.
+// Общий интерфейс командной строки CPU- и CUDA-бинарников: оба запускаются одинаково, и их числа напрямую сравнимы.
 #pragma once
 
-#include <chrono>
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <functional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "cc_graph.hpp"
@@ -37,152 +38,175 @@ struct Options {
   std::string labels_out_path;
 };
 
-inline void PrintUsage(const char* program) {
-  std::printf(
-      "usage: %s [options]\n"
-      "\n"
-      "инстанс\n"
-      "  --n N                 сгенерировать G(n,p) на N вершинах (по умолчанию 500)\n"
-      "  --density P           вероятность ребра (по умолчанию 0.5)\n"
-      "  --graph-seed S        сид генератора, фиксирует инстанс (по умолчанию 1)\n"
-      "  --graph PATH          загрузить матрицу вместо генерации\n"
-      "  --graph-json PATH     загрузить блок \"graph\" из файла результата бейзлайна\n"
-      "  --save-graph PATH     сохранить инстанс как обычную матрицу\n"
-      "  --save-graph-json PATH  сохранить инстанс в формате JSON бейзлайна\n"
-      "  --tags PATH           граф по тегам (data/Tags_*.json бейзлайна): n случайных объектов\n"
-      "                        по --graph-seed, ребро при сходстве тегов не ниже порога;\n"
-      "                        --n 0 берёт все объекты\n"
-      "  --similarity M        мера для --tags: jaccard (по умолчанию), cosine, dice, overlap\n"
-      "  --threshold T         порог для --tags (по умолчанию 0.5)\n"
-      "\n"
-      "алгоритм\n"
-      "  --k K                 верхняя граница числа кластеров (по умолчанию 2)\n"
-      "  --pop P               размер популяции (по умолчанию 128)\n"
-      "  --tournament T        размер турнира (по умолчанию 5)\n"
-      "  --iters I             предел числа итераций (по умолчанию 100)\n"
-      "  --early-stop E        остановиться после E итераций без рекорда (по умолчанию 6)\n"
-      "  --perturb Q           вероятность перемаркировки вершины (по умолчанию 0.4)\n"
-      "  --seed S              сид поиска (по умолчанию 1)\n"
-      "  --threads T           только CPU: сколько особей популяции считать сразу,\n"
-      "                        0 - по числу ядер (по умолчанию 1)\n"
-      "  --time-limit T        лимит времени в секундах, 0 отключает (по умолчанию 0)\n"
-      "  --ls-kernel WHERE     только GPU: auto (по умолчанию), shared или global -\n"
-      "                        где хранится состояние решения во время локального поиска;\n"
-      "                        при k = 2 auto берёт отдельное ядро с состоянием в регистрах;\n"
-      "                        wide - ядра с 32-битной G, которые на графе больше 32 767\n"
-      "                        вершин включаются сами\n"
-      "\n"
-      "эксперимент\n"
-      "  --runs R              независимых прогонов, печатает min/avg/max (по умолчанию 1)\n"
-      "  --no-verify           пропустить пересчёт целевой функции за O(n^2)\n"
-      "  --out PATH            сохранить результат в JSON\n"
-      "  --labels-out PATH     сохранить лучшую кластеризацию как метки\n"
-      "  --verbose             печатать прогресс по итерациям\n",
-      program);
+// Числа разбираются так же нестрого, как atoi и strtod: мусор даёт 0.
+inline void ParseValue(const char* text, int& field) { field = std::atoi(text); }
+inline void ParseValue(const char* text, unsigned& field) { field = (unsigned)std::strtoul(text, nullptr, 10); }
+inline void ParseValue(const char* text, uint64_t& field) { field = (uint64_t)std::strtoull(text, nullptr, 10); }
+inline void ParseValue(const char* text, double& field) { field = std::strtod(text, nullptr); }
+inline void ParseValue(const char* text, std::string& field) { field = text; }
+
+inline std::string ShowValue(const std::string& value) { return value; }
+inline std::string ShowValue(double value) {
+  char text[32];
+  std::snprintf(text, sizeof(text), "%g", value);
+  return text;
+}
+template <typename T>
+std::string ShowValue(T value) {
+  return std::to_string(value);
 }
 
-inline bool NeedsValue(const char* flag, int index, int argc) {
-  if (index + 1 < argc) return true;
-  std::printf("error: %s needs a value\n", flag);
-  return false;
+// Опция командной строки. value — имя значения в справке, у переключателя nullptr. apply возвращает false, если
+// значение не подошло; show даёт значение по умолчанию для справки, пустое не печатается.
+struct Flag {
+  const char* name;
+  const char* value;
+  const char* help;
+  std::function<bool(const char*)> apply;
+  std::function<std::string()> show;
+};
+
+template <typename T>
+Flag Option(const char* name, const char* value, const char* help, T& field) {
+  auto apply = [&field](const char* text) {
+    ParseValue(text, field);
+    return true;
+  };
+  return {name, value, help, apply, [&field] { return ShowValue(field); }};
+}
+
+inline Flag Switch(const char* name, const char* help, bool& field, bool on) {
+  auto apply = [&field, on](const char*) {
+    field = on;
+    return true;
+  };
+  return {name, nullptr, help, apply, nullptr};
+}
+
+// Значение из списка имён.
+inline Flag Choice(const char* name, const char* value, const char* help, int& field,
+                   std::vector<std::pair<const char*, int>> choices) {
+  auto apply = [&field, choices](const char* text) {
+    for (const auto& choice : choices) {
+      if (std::strcmp(text, choice.first) == 0) {
+        field = choice.second;
+        return true;
+      }
+    }
+    return false;
+  };
+  auto show = [&field, choices] {
+    for (const auto& choice : choices) {
+      if (field == choice.second) return std::string(choice.first);
+    }
+    return std::string();
+  };
+  return {name, value, help, apply, show};
+}
+
+struct Section {
+  const char* title;
+  std::vector<Flag> flags;
+};
+
+inline std::vector<Section> Flags(Options& o) {
+  PbilsParams& p = o.params;
+  return {
+      {"инстанс",
+       {
+           Option("--n", "N", "сгенерировать G(n,p) на N вершинах", o.n),
+           Option("--density", "P", "вероятность ребра", o.density),
+           Option("--graph-seed", "S", "сид генератора, фиксирует инстанс", o.graph_seed),
+           Option("--graph", "PATH", "загрузить матрицу вместо генерации", o.graph_path),
+           Option("--graph-json", "PATH", "загрузить блок \"graph\" из файла результата бейзлайна", o.graph_json_path),
+           Option("--save-graph", "PATH", "сохранить инстанс как обычную матрицу", o.save_graph_path),
+           Option("--save-graph-json", "PATH", "сохранить инстанс в формате JSON бейзлайна", o.save_graph_json_path),
+           Option("--tags", "PATH",
+                  "граф по тегам (data/Tags_*.json бейзлайна): n случайных объектов по --graph-seed,\n"
+                  "ребро при сходстве тегов не ниже порога; --n 0 берёт все объекты",
+                  o.tags_path),
+           Option("--similarity", "M", "мера для --tags: jaccard, cosine, dice, overlap", o.similarity),
+           Option("--threshold", "T", "порог для --tags", o.threshold),
+       }},
+      {"алгоритм",
+       {
+           Option("--k", "K", "верхняя граница числа кластеров", p.k),
+           Option("--pop", "P", "размер популяции", p.population),
+           Option("--tournament", "T", "размер турнира", p.tournament),
+           Option("--iters", "I", "предел числа итераций", p.iterations),
+           Option("--early-stop", "E", "остановиться после E итераций без рекорда", p.early_stop),
+           Option("--perturb", "Q", "вероятность перемаркировки вершины", p.perturbation),
+           Option("--seed", "S", "сид поиска", p.seed),
+           Option("--threads", "T", "только CPU: сколько особей популяции считать сразу, 0 - по числу ядер", p.threads),
+           Option("--time-limit", "T", "лимит времени в секундах, 0 отключает", p.time_limit_sec),
+           Choice("--ls-kernel", "WHERE",
+                  "только GPU: где состояние решения во время локального поиска: shared или global;\n"
+                  "auto выбирает сам и при k = 2 берёт отдельное ядро с состоянием в регистрах;\n"
+                  "wide - широкий путь, 32-битная G; на графе больше 32 767 вершин включается сам",
+                  p.ls_kernel,
+                  {{"auto", PbilsParams::kLocalSearchAuto},
+                   {"shared", PbilsParams::kLocalSearchShared},
+                   {"global", PbilsParams::kLocalSearchGlobal},
+                   {"wide", PbilsParams::kLocalSearchWide}}),
+       }},
+      {"эксперимент",
+       {
+           Option("--runs", "R", "независимых прогонов, печатает min/avg/max", o.runs),
+           Switch("--no-verify", "пропустить пересчёт целевой функции", o.verify, false),
+           Option("--out", "PATH", "сохранить результат в JSON", o.out_path),
+           Option("--labels-out", "PATH", "сохранить лучшую кластеризацию как метки", o.labels_out_path),
+           Switch("--verbose", "печатать прогресс по итерациям", p.verbose, true),
+       }},
+  };
+}
+
+inline void PrintUsage(const char* program) {
+  constexpr int kHelpColumn = 24;
+  Options defaults;
+  std::printf("usage: %s [options]\n", program);
+  for (const Section& section : Flags(defaults)) {
+    std::printf("\n%s\n", section.title);
+    for (const Flag& flag : section.flags) {
+      std::string head = std::string("  ") + flag.name + (flag.value ? std::string(" ") + flag.value : "");
+      head.resize(std::max<size_t>(head.size() + 1, kHelpColumn), ' ');
+      std::string help = flag.help;
+      const std::string fallback = flag.show ? flag.show() : "";
+      if (!fallback.empty()) help += " (по умолчанию " + fallback + ")";
+      const std::string indent = "\n" + std::string(kHelpColumn, ' ');  // продолжения справки — с её колонки
+      for (size_t at = help.find('\n'); at != std::string::npos; at = help.find('\n', at + indent.size())) {
+        help.replace(at, 1, indent);
+      }
+      std::printf("%s%s\n", head.c_str(), help.c_str());
+    }
+  }
 }
 
 inline bool Parse(int argc, char** argv, Options& options) {
+  const std::vector<Section> sections = Flags(options);
   for (int i = 1; i < argc; ++i) {
-    const char* flag = argv[i];
-    auto value = [&]() { return argv[++i]; };
-
-    if (!std::strcmp(flag, "--help") || !std::strcmp(flag, "-h")) {
+    const char* name = argv[i];
+    if (!std::strcmp(name, "--help") || !std::strcmp(name, "-h")) {
       PrintUsage(argv[0]);
       return false;
-    } else if (!std::strcmp(flag, "--n")) {
-      if (!NeedsValue(flag, i, argc)) return false;
-      options.n = (unsigned)std::strtoul(value(), nullptr, 10);
-    } else if (!std::strcmp(flag, "--density")) {
-      if (!NeedsValue(flag, i, argc)) return false;
-      options.density = std::strtod(value(), nullptr);
-    } else if (!std::strcmp(flag, "--graph-seed")) {
-      if (!NeedsValue(flag, i, argc)) return false;
-      options.graph_seed = std::strtoull(value(), nullptr, 10);
-    } else if (!std::strcmp(flag, "--graph")) {
-      if (!NeedsValue(flag, i, argc)) return false;
-      options.graph_path = value();
-    } else if (!std::strcmp(flag, "--graph-json")) {
-      if (!NeedsValue(flag, i, argc)) return false;
-      options.graph_json_path = value();
-    } else if (!std::strcmp(flag, "--save-graph")) {
-      if (!NeedsValue(flag, i, argc)) return false;
-      options.save_graph_path = value();
-    } else if (!std::strcmp(flag, "--save-graph-json")) {
-      if (!NeedsValue(flag, i, argc)) return false;
-      options.save_graph_json_path = value();
-    } else if (!std::strcmp(flag, "--tags")) {
-      if (!NeedsValue(flag, i, argc)) return false;
-      options.tags_path = value();
-    } else if (!std::strcmp(flag, "--similarity")) {
-      if (!NeedsValue(flag, i, argc)) return false;
-      options.similarity = value();
-    } else if (!std::strcmp(flag, "--threshold")) {
-      if (!NeedsValue(flag, i, argc)) return false;
-      options.threshold = std::strtod(value(), nullptr);
-    } else if (!std::strcmp(flag, "--k")) {
-      if (!NeedsValue(flag, i, argc)) return false;
-      options.params.k = std::atoi(value());
-    } else if (!std::strcmp(flag, "--pop")) {
-      if (!NeedsValue(flag, i, argc)) return false;
-      options.params.population = std::atoi(value());
-    } else if (!std::strcmp(flag, "--tournament")) {
-      if (!NeedsValue(flag, i, argc)) return false;
-      options.params.tournament = std::atoi(value());
-    } else if (!std::strcmp(flag, "--iters")) {
-      if (!NeedsValue(flag, i, argc)) return false;
-      options.params.iterations = std::atoi(value());
-    } else if (!std::strcmp(flag, "--early-stop")) {
-      if (!NeedsValue(flag, i, argc)) return false;
-      options.params.early_stop = std::atoi(value());
-    } else if (!std::strcmp(flag, "--perturb")) {
-      if (!NeedsValue(flag, i, argc)) return false;
-      options.params.perturbation = std::strtod(value(), nullptr);
-    } else if (!std::strcmp(flag, "--seed")) {
-      if (!NeedsValue(flag, i, argc)) return false;
-      options.params.seed = std::strtoull(value(), nullptr, 10);
-    } else if (!std::strcmp(flag, "--threads")) {
-      if (!NeedsValue(flag, i, argc)) return false;
-      options.params.threads = std::atoi(value());
-    } else if (!std::strcmp(flag, "--time-limit")) {
-      if (!NeedsValue(flag, i, argc)) return false;
-      options.params.time_limit_sec = std::strtod(value(), nullptr);
-    } else if (!std::strcmp(flag, "--ls-kernel")) {
-      if (!NeedsValue(flag, i, argc)) return false;
-      const char* where = value();
-      if (!std::strcmp(where, "auto")) {
-        options.params.ls_kernel = PbilsParams::kLocalSearchAuto;
-      } else if (!std::strcmp(where, "shared")) {
-        options.params.ls_kernel = PbilsParams::kLocalSearchShared;
-      } else if (!std::strcmp(where, "global")) {
-        options.params.ls_kernel = PbilsParams::kLocalSearchGlobal;
-      } else if (!std::strcmp(where, "wide")) {
-        options.params.ls_kernel = PbilsParams::kLocalSearchWide;
-      } else {
-        std::printf("error: --ls-kernel expects auto, shared, global or wide\n");
-        return false;
+    }
+    const Flag* flag = nullptr;
+    for (const Section& section : sections) {
+      for (const Flag& candidate : section.flags) {
+        if (!std::strcmp(name, candidate.name)) flag = &candidate;
       }
-    } else if (!std::strcmp(flag, "--runs")) {
-      if (!NeedsValue(flag, i, argc)) return false;
-      options.runs = std::atoi(value());
-    } else if (!std::strcmp(flag, "--no-verify")) {
-      options.verify = false;
-    } else if (!std::strcmp(flag, "--out")) {
-      if (!NeedsValue(flag, i, argc)) return false;
-      options.out_path = value();
-    } else if (!std::strcmp(flag, "--labels-out")) {
-      if (!NeedsValue(flag, i, argc)) return false;
-      options.labels_out_path = value();
-    } else if (!std::strcmp(flag, "--verbose")) {
-      options.params.verbose = true;
-    } else {
-      std::printf("error: unknown option %s\n", flag);
+    }
+    if (flag == nullptr) {
+      std::printf("error: unknown option %s\n", name);
       PrintUsage(argv[0]);
+      return false;
+    }
+    if (flag->value != nullptr && i + 1 >= argc) {
+      std::printf("error: %s needs a value\n", name);
+      return false;
+    }
+    const char* value = flag->value != nullptr ? argv[++i] : nullptr;
+    if (!flag->apply(value)) {
+      std::printf("error: %s does not accept %s, see --help\n", name, value);
       return false;
     }
   }
@@ -213,7 +237,7 @@ inline void WriteResultJson(const std::string& path, const Graph& graph, const O
   out << "  \"density\": " << graph.Density() << ",\n";
   out << "  \"k\": " << options.params.k << ",\n";
   out << "  \"population\": " << options.params.population << ",\n";
-  // Число потоков есть часть условий замера, поэтому попадает в результат.
+  // Число потоков — часть условий замера.
   if (!std::strcmp(backend, "cpu")) out << "  \"threads\": " << ResolveThreads(options.params) << ",\n";
   out << "  \"runs\": " << options.runs << ",\n";
   out << "  \"objective function value\": " << best.objective << ",\n";
@@ -223,17 +247,14 @@ inline void WriteResultJson(const std::string& path, const Graph& graph, const O
   out << "  \"computation time average\": " << avg_seconds << ",\n";
   out << "  \"clusters used\": " << best.clusters_used << ",\n";
   out << "  \"clustering vector\": [";
-  for (size_t i = 0; i < best.labels.size(); ++i) {
-    out << best.labels[i];
-    if (i + 1 != best.labels.size()) out << ",";
-  }
+  for (size_t i = 0; i < best.labels.size(); ++i) out << best.labels[i] << (i + 1 != best.labels.size() ? "," : "");
   out << "]\n}\n";
 }
 
 using SolverFn = PbilsResult (*)(const Graph&, const PbilsParams&);
 
-// До этого размера найденное f перепроверяется попарно, по определению; на большем графе попарный подсчёт
-// шёл бы минутами, и его заменяет ObjectiveBitwise.
+// До этого размера найденное f перепроверяется попарно, по определению; на большем графе попарный подсчёт шёл бы
+// минутами, и его заменяет ObjectiveBitwise.
 constexpr unsigned kPairwiseVerifyLimit = 32767;
 
 inline int Main(int argc, char** argv, const char* backend, SolverFn solve) {
@@ -251,24 +272,23 @@ inline int Main(int argc, char** argv, const char* backend, SolverFn solve) {
   if (!options.save_graph_path.empty()) graph.SaveMatrix(options.save_graph_path);
   if (!options.save_graph_json_path.empty()) graph.SaveBaselineJson(options.save_graph_json_path);
 
+  const PbilsParams& p = options.params;
   std::printf("backend      %s\n", backend);
-  std::printf("instance     n=%u  edges=%llu  density=%.4f\n", graph.Size(),
-              (unsigned long long)graph.EdgeCount(), graph.Density());
-  std::printf("algorithm    PBILS  k=%d  pop=%d  tournament=%d  iters=%d  early-stop=%d  perturb=%.2f\n",
-              options.params.k, options.params.population, options.params.tournament,
-              options.params.iterations, options.params.early_stop, options.params.perturbation);
-  // Печатается реально используемое число потоков: --threads 0 означает "по числу ядер", и больше
-  // одного потока на особь всё равно не берётся.
-  if (!std::strcmp(backend, "cpu")) std::printf("threads      %d\n", ResolveThreads(options.params));
+  std::printf("instance     n=%u  edges=%llu  density=%.4f\n", graph.Size(), (unsigned long long)graph.EdgeCount(),
+              graph.Density());
+  std::printf("algorithm    PBILS  k=%d  pop=%d  tournament=%d  iters=%d  early-stop=%d  perturb=%.2f\n", p.k,
+              p.population, p.tournament, p.iterations, p.early_stop, p.perturbation);
+  // Реально используемое число потоков: --threads 0 — по числу ядер, и больше потока на особь не берётся.
+  if (!std::strcmp(backend, "cpu")) std::printf("threads      %d\n", ResolveThreads(p));
 
+  const bool pairwise = graph.Size() <= kPairwiseVerifyLimit;
   PbilsResult best;
   double objective_sum = 0.0;
   double seconds_sum = 0.0;
   long long worst = 0;
-
   for (int run = 0; run < options.runs; ++run) {
-    PbilsParams params = options.params;
-    params.seed = options.params.seed + (uint64_t)run;
+    PbilsParams params = p;
+    params.seed = p.seed + (uint64_t)run;
 
     PbilsResult result;
     try {
@@ -279,8 +299,7 @@ inline int Main(int argc, char** argv, const char* backend, SolverFn solve) {
     }
 
     if (options.verify) {
-      const long long truth = graph.Size() <= kPairwiseVerifyLimit ? ObjectiveDirect(graph, result.labels)
-                                                                   : ObjectiveBitwise(graph, result.labels);
+      const long long truth = pairwise ? ObjectiveDirect(graph, result.labels) : ObjectiveBitwise(graph, result.labels);
       if (truth != result.objective) {
         std::printf("MISMATCH run %d: reported %lld, recount %lld\n", run, result.objective, truth);
         return 2;
@@ -294,7 +313,7 @@ inline int Main(int argc, char** argv, const char* backend, SolverFn solve) {
 
     std::printf("run %-3d      f=%-10lld  clusters=%-3d  iters=%-4d  %.3fs\n", run, result.objective,
                 result.clusters_used, result.iterations_done, result.seconds);
-    if (options.params.verbose && result.local_searches > 0) {
+    if (p.verbose && result.local_searches > 0) {
       std::printf("moves        %lld accepted, %.0f per local search\n", result.accepted_moves,
                   (double)result.accepted_moves / (double)result.local_searches);
     }
@@ -306,9 +325,8 @@ inline int Main(int argc, char** argv, const char* backend, SolverFn solve) {
   std::printf("objective    min=%lld  avg=%.2f  max=%lld\n", best.objective, avg_objective, worst);
   std::printf("time         best=%.3fs  avg=%.3fs\n", best.seconds, avg_seconds);
   if (options.verify) {
-    std::printf(graph.Size() <= kPairwiseVerifyLimit
-                    ? "verified     reported value recounted pairwise in O(n^2)\n"
-                    : "verified     reported value recounted over bit rows in O(n^2/32)\n");
+    std::printf(pairwise ? "verified     reported value recounted pairwise in O(n^2)\n"
+                         : "verified     reported value recounted over bit rows in O(n^2/32)\n");
   }
 
   if (!options.out_path.empty()) {
@@ -317,9 +335,7 @@ inline int Main(int argc, char** argv, const char* backend, SolverFn solve) {
   }
   if (!options.labels_out_path.empty()) {
     std::ofstream out(options.labels_out_path);
-    for (size_t v = 0; v < best.labels.size(); ++v) {
-      out << best.labels[v] << (v + 1 == best.labels.size() ? "\n" : " ");
-    }
+    for (size_t v = 0; v < best.labels.size(); ++v) out << best.labels[v] << (v + 1 == best.labels.size() ? "\n" : " ");
     std::printf("written      %s\n", options.labels_out_path.c_str());
   }
   return 0;
