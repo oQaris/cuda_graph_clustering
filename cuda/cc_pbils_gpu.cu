@@ -146,6 +146,7 @@ template <typename GainT>
 struct Run {
   int words = 0;
   int population = 0;
+  int copies = 0;  // сколько худших особей GWW заменяет копиями лучших
   long long edges = 0;
   Plan plan;
   DeviceMemory memory;
@@ -155,6 +156,7 @@ struct Run {
   unsigned long long* work = nullptr;   // слова вершин KernelLocalSearch3Wide
   unsigned long long* moves = nullptr;  // принятые ходы, для --verbose
   int* next_individual = nullptr;       // счётчик постоянной сетки
+  int* order = nullptr;                 // слоты от лучшего к худшему, для GWW
   Population<GainT> pop;                // текущая популяция
   Population<GainT> next;               // сюда пишет селекция
 
@@ -169,6 +171,7 @@ struct Run {
     f(work, plan.descent == Descent::kK3Wide ? labels : 0);
     f(moves, 1);
     f(next_individual, 1);
+    f(order, copies > 0 ? (size_t)population : 0);
     for (Population<GainT>* p : {&pop, &next}) {
       f(p->labels, labels);
       f(p->g, labels * pop.k);
@@ -177,7 +180,10 @@ struct Run {
     }
   }
 
-  Run(const Graph& graph, const PbilsParams& params) : words((int)graph.WordsPerRow()), population(params.population) {
+  Run(const Graph& graph, const PbilsParams& params)
+      : words((int)graph.WordsPerRow()),
+        population(params.population),
+        copies(WinnerCopies(params.gww, params.population)) {
     const Device device = Device::Current();
     const int n = (int)graph.Size();
     edges = (long long)graph.EdgeCount();
@@ -323,6 +329,17 @@ bool PullRecord(const Run<GainT>& run, std::vector<long long>& host_f, PbilsResu
   return true;
 }
 
+// GWW: порядок слотов считает хост по f, которые PullRecord уже скопировал, — тот же, что у CPU.
+template <typename GainT>
+void CopyWinners(const Run<GainT>& run, const std::vector<long long>& host_f) {
+  const std::vector<int> order = RankSlots(host_f.data(), run.population);
+  CC_CUDA_CHECK(cudaMemcpy(run.order, order.data(), order.size() * sizeof(int), cudaMemcpyHostToDevice));
+  const Population<GainT>& p = run.pop;
+  KernelCopyWinners<GainT>
+      <<<run.copies, tuning::kBlockSize>>>(p.n, p.k, run.population, run.order, p.labels, p.g, p.sizes, p.f);
+  CheckLaunch();
+}
+
 template <typename GainT>
 PbilsResult Solve(const Graph& graph, const PbilsParams& params) {
   using Index = std::conditional_t<std::is_same_v<GainT, WideGain>, long long, int>;
@@ -346,6 +363,7 @@ PbilsResult Solve(const Graph& graph, const PbilsParams& params) {
     Select(run, params.tournament, select_stream, iteration);
     Descend(run);
     if (progress.Next(result, PullRecord(run, host_f, result))) break;
+    if (run.copies > 0) CopyWinners(run, host_f);
 
     if (k >= 2 && params.perturbation > 0.0) {
       KernelPerturb<Index><<<grid, tuning::kBlockSize>>>(labels, k, (float)params.perturbation, run.pop.labels,
@@ -368,12 +386,11 @@ PbilsResult Solve(const Graph& graph, const PbilsParams& params) {
 }  // namespace gpu
 
 PbilsResult SolveGpu(const Graph& graph, const PbilsParams& params) {
-  if (params.k < 1) throw std::runtime_error("k must be >= 1");
+  CheckParams(params);
   if (params.k > kMaxClusters) {
     throw std::runtime_error("k exceeds kMaxClusters (" + std::to_string(kMaxClusters) +
                              "); raise it in cc_gpu.hpp and rebuild");
   }
-  if (params.population < 1) throw std::runtime_error("population must be >= 1");
   const int n = (int)graph.Size();
   if (n > gpu::kMaxVerticesWide) {
     throw std::runtime_error("n exceeds " + std::to_string(gpu::kMaxVerticesWide) + ", the range of the packed move");

@@ -9,7 +9,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from matplotlib.ticker import FuncFormatter, NullLocator
+from matplotlib.ticker import FuncFormatter, LogLocator, NullLocator
 
 DATA, IMG = sys.argv[1], sys.argv[2]
 
@@ -251,6 +251,95 @@ a2.xaxis.set_minor_locator(NullLocator())
 a2.legend(frameon=False, loc="lower left")
 save(fig, "pop_optimum.png")
 
+# --------------------------------------------------------------------------- GWW
+# Отставание рекорда от лучшего решения, найденного на этом графе при этом k любым прогоном (с GWW и без, при любой
+# популяции, в обоих режимах), медиана по графам и сидам. Конфигурация: случайные G(n, p) по n, k и популяции, реальный
+# граф по имени.
+# Без GWW — PBILS оригинала, его цвет оранжевый; доли GWW упорядочены, поэтому одна синяя шкала от светлого к тёмному.
+GWW_SHARES = [("0", "без GWW", ORANGE, "--", "s"), ("0.05", "GWW 0,05", "#86b6ef", "-", "v"),
+              ("0.1", "GWW 0,1", "#3987e5", "-", "o"), ("0.25", "GWW 0,25", "#1c5cab", "-", "^")]
+gww_curves = list(csv.DictReader(open(f"{DATA}/gww.csv")))
+gww_stops = list(csv.DictReader(open(f"{DATA}/gww_stop.csv")))
+gww_best = {}
+for r in gww_curves + gww_stops:
+    value = int(r["record"] if "record" in r else r["f"])
+    gww_best[(r["graph"], r["k"])] = min(gww_best.get((r["graph"], r["k"]), value), value)
+
+
+def gww_config(r):
+    return (r["set"], int(r["n"]) if r["set"] == "random" else r["graph"], int(r["k"]), int(r["pop"]))
+
+
+def gww_gap(r, column):
+    best = gww_best[(r["graph"], r["k"])]
+    return (int(r[column]) - best) / best * 100
+
+
+# (конфигурация, доля, итерация) -> {(граф, сид): строка}
+gww_at = defaultdict(dict)
+for r in gww_curves:
+    gww_at[(gww_config(r), r["gww"], int(r["iter"]))][(r["graph"], r["seed"])] = r
+gww_configs = list(dict.fromkeys(gww_config(r) for r in gww_curves))  # в порядке docs/gww_sweep.py
+
+
+def gww_title(config):
+    kind, name, k, pop = config
+    head = "G(n, p), n = " + f"{name:,}".replace(",", " ") if kind == "random" else name
+    return f"{head}, k = {k}" + (f", популяция {pop}" if pop != 128 else "")
+
+
+def gww_iters(config, share):
+    return sorted(i for (c, s, i) in gww_at if c == config and s == share)
+
+
+def gww_median(config, share, it):
+    return median(gww_gap(r, "record") for r in gww_at[(config, share, it)].values())
+
+
+def gww_wins(runs, base, column):
+    # Попарно по (граф, сид): сколько прогонов с GWW лучше прогона без него и сколько хуже.
+    better = sum(int(r[column]) < int(base[key][column]) for key, r in runs.items())
+    worse = sum(int(r[column]) > int(base[key][column]) for key, r in runs.items())
+    return f"{better}:{worse}"
+
+
+def gww_panels(configs, name, title):
+    if not configs:
+        return
+    cols = 3
+    rows = (len(configs) + cols - 1) // cols
+    fig, axes = plt.subplots(rows, cols, figsize=(5.1 * cols, 3.6 * rows + 0.6), dpi=150, squeeze=False)
+    fig.suptitle(title, x=0.01, ha="left", fontsize=12, color=INK)
+    for ax, config in zip(axes.flat, configs):
+        for share, label, color, ls, marker in GWW_SHARES:
+            xs = gww_iters(config, share)
+            if not xs:
+                continue
+            ys = [gww_median(config, share, i) for i in xs]
+            ax.plot(xs, ys, ls, color=color, lw=2, marker=marker, ms=4, label=label)
+        style(ax, "итерация (лог. шкала)", "отставание, % (лог. шкала)", gww_title(config), logy=True)
+        ax.yaxis.set_major_locator(LogLocator(base=10, subs=(1, 2, 5)))
+        ax.yaxis.set_minor_locator(NullLocator())
+        ax.set_xscale("log")
+        ax.xaxis.set_major_formatter(INT)
+    for ax in axes.flat[len(configs):]:
+        ax.set_visible(False)
+    handles = {}  # доля 0,05 есть не на всех панелях, так что легенда собирается со всех
+    for ax in axes.flat:
+        for handle, label in zip(*ax.get_legend_handles_labels()):
+            handles.setdefault(label, handle)
+    labels = [s[1] for s in GWW_SHARES if s[1] in handles]
+    fig.legend([handles[label] for label in labels], labels, frameon=False, loc="lower center", ncol=len(labels))
+    fig.tight_layout(rect=(0, 0.05, 1, 1))
+    fig.savefig(f"{IMG}/{name}")
+    plt.close(fig)
+
+
+gww_panels([c for c in gww_configs if c[0] == "random"], "gww_random.png",
+           "GWW на случайных графах G(n, p), p = 0,33: медианное отставание рекорда от лучшего известного, 16 прогонов")
+gww_panels([c for c in gww_configs if c[0] != "random"], "gww_real.png",
+           "GWW на реальных графах: медианное отставание рекорда от лучшего известного, 4 прогона")
+
 # --------------------------------------------------------------------------- таблицы для md
 if "--tables" in sys.argv:
     def s(x):
@@ -275,3 +364,37 @@ if "--tables" in sys.argv:
             cells = ["—" if vals[p] is None else (f"**{comma(round(vals[p], 3))}**" if p == top
                                                    else comma(round(vals[p], 3))) for p in popopt_pops]
             print(f"| {comma(b)} с | " + " | ".join(cells) + " |")
+
+    # GWW: медианное отставание, %, и в скобках победы:поражения против прогона без GWW с тем же графом и сидом.
+    GWW_BUDGETS = [10, 30, 100, 300, 1000]
+
+    def pct(x):
+        return comma(float(f"{x:.2g}"))
+
+    for config in gww_configs:
+        shares = [s for s in GWW_SHARES if gww_iters(config, s[0])]
+        last = max(gww_iters(config, "0"))
+        print(f"\ngww {gww_title(config)}\n| итераций | " + " | ".join(s[1] for s in shares) + " |")
+        for it in [b for b in GWW_BUDGETS if b < last] + [last]:
+            base = gww_at[(config, "0", it)]
+            cells = [pct(gww_median(config, "0", it))]
+            cells += [f"{pct(gww_median(config, s, it))} ({gww_wins(gww_at[(config, s, it)], base, 'record')})"
+                      for s, *_ in shares[1:]]
+            print(f"| {it} | " + " | ".join(cells) + " |")
+        # Цена GWW: время к последней итерации, медиана; траектории разные, и сюда входит разница в работе спуска.
+        seconds = {sh: median(float(r["t"]) for r in gww_at[(config, sh, last)].values()) for sh in ("0", "0.1")}
+        print(f"time to {last}: {s(seconds['0'])} vs {s(seconds['0.1'])}, x{seconds['0.1'] / seconds['0']:.3f}")
+
+    stop_at = defaultdict(dict)
+    for r in gww_stops:
+        stop_at[(gww_config(r), r["gww"])][(r["graph"], r["seed"])] = r
+    print("\ngww stop\n| граф | без GWW: отставание, итераций, время | GWW 0,1: отставание, итераций, время | победы |")
+    for config in gww_configs:
+        cells = []
+        for share in ("0", "0.1"):
+            runs = stop_at[(config, share)].values()
+            iters = comma(median(int(r["iters"]) for r in runs))
+            cells.append(f"{pct(median(gww_gap(r, 'f') for r in runs))} %, {iters}, "
+                         f"{s(median(float(r['seconds']) for r in runs))}")
+        wins = gww_wins(stop_at[(config, "0.1")], stop_at[(config, "0")], "f")
+        print(f"| {gww_title(config)} | " + " | ".join(cells) + f" | {wins} |")

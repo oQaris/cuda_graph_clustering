@@ -210,20 +210,24 @@ void TestGraphIo() {
   std::remove(json_path.c_str());
 }
 
-// 6. Решатель должен возвращать разметку, чьё заявленное значение — настоящее.
+// 6. Решатель должен возвращать разметку, чьё заявленное значение — настоящее, с GWW и без.
 void TestSolverReportsTruth() {
   std::printf("solver result is self-consistent\n");
   const cc::Graph graph = cc::Graph::ErdosRenyi(120, 0.5, 4242);
   for (const int k : {2, 3, 6}) {
-    cc::PbilsParams params;
-    params.k = k;
-    params.population = 16;
-    params.iterations = 12;
-    params.early_stop = 4;
-    params.seed = 7;
-    const cc::PbilsResult result = cc::SolveCpu(graph, params);
-    CheckEq(result.objective, cc::ObjectiveDirect(graph, result.labels), "reported objective, k=" + std::to_string(k));
-    Check(result.clusters_used >= 1 && result.clusters_used <= k, "clusters used within bound");
+    for (const double gww : {0.0, 0.25}) {
+      cc::PbilsParams params;
+      params.k = k;
+      params.population = 16;
+      params.iterations = 12;
+      params.early_stop = 4;
+      params.seed = 7;
+      params.gww = gww;
+      const cc::PbilsResult result = cc::SolveCpu(graph, params);
+      const std::string what = "k=" + std::to_string(k) + " gww=" + std::to_string(gww);
+      CheckEq(result.objective, cc::ObjectiveDirect(graph, result.labels), "reported objective, " + what);
+      Check(result.clusters_used >= 1 && result.clusters_used <= k, "clusters used within bound, " + what);
+    }
   }
 }
 
@@ -369,6 +373,31 @@ void TestEdgeList() {
   std::remove(path.c_str());
 }
 
+// 11. GWW: слоты по f, при равных — по номеру; копий — целая часть доли; ответ не зависит от числа потоков.
+void TestGoWithTheWinners() {
+  std::printf("GWW: slot order, copy count, thread count\n");
+  const std::vector<long long> f = {5, 3, 5, 1, 3};
+  const std::vector<int> order = cc::RankSlots(f.data(), (int)f.size());
+  Check(order == std::vector<int>({3, 1, 4, 0, 2}), "slot order by f, then by slot");
+  CheckEq(cc::WinnerCopies(0.1, 128), 12, "copies at gww 0.1, population 128");
+  CheckEq(cc::WinnerCopies(cc::kMaxGwwShare, 7), 3, "copies never overlap winners");
+
+  const cc::Graph graph = cc::Graph::ErdosRenyi(150, 0.4, 99);
+  cc::PbilsParams params;
+  params.k = 3;
+  params.population = 24;
+  params.iterations = 15;
+  params.early_stop = params.iterations;
+  params.gww = 0.25;
+  params.threads = 1;
+  const cc::PbilsResult one = cc::SolveCpu(graph, params);
+  params.threads = 4;
+  const cc::PbilsResult four = cc::SolveCpu(graph, params);
+  CheckEq(four.objective, one.objective, "GWW: objective with 4 threads");
+  CheckEq(four.iterations_done, one.iterations_done, "GWW: iterations with 4 threads");
+  Check(four.labels == one.labels, "GWW: labels with 4 threads");
+}
+
 }  // namespace
 
 int main() {
@@ -382,6 +411,7 @@ int main() {
   TestBitwiseObjective();
   TestTagsGraph();
   TestEdgeList();
+  TestGoWithTheWinners();
 
   std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
   return g_failures == 0 ? 0 : 1;

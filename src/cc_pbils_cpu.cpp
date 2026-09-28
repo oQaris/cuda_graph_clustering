@@ -165,10 +165,23 @@ int ResolveThreads(const PbilsParams& params) {
   return params.population >= 1 ? std::min(threads, params.population) : threads;
 }
 
-PbilsResult SolveCpu(const Graph& graph, const PbilsParams& params) {
+int WinnerCopies(double gww, int population) { return (int)(gww * population); }
+
+std::vector<int> RankSlots(const long long* f, int population) {
+  std::vector<int> order(population);
+  for (int slot = 0; slot < population; ++slot) order[slot] = slot;
+  std::sort(order.begin(), order.end(), [f](int a, int b) { return f[a] != f[b] ? f[a] < f[b] : a < b; });
+  return order;
+}
+
+void CheckParams(const PbilsParams& params) {
   if (params.k < 1) throw std::runtime_error("k must be >= 1");
   if (params.population < 1) throw std::runtime_error("population must be >= 1");
+  if (params.gww < 0.0 || params.gww > kMaxGwwShare) throw std::runtime_error("gww must be in [0, 0.5]");
+}
 
+PbilsResult SolveCpu(const Graph& graph, const PbilsParams& params) {
+  CheckParams(params);
   Progress progress(params);
   const int n = (int)graph.Size();
   const int size = params.population;
@@ -216,6 +229,14 @@ PbilsResult SolveCpu(const Graph& graph, const PbilsParams& params) {
     const bool improved = offer_record(next);
     for (const long long applied : moves) result.accepted_moves += applied;
     if (progress.Next(result, improved)) break;
+
+    // GWW: худшие локальные оптимумы заменяются копиями лучших, пока их не развело возмущение.
+    const int copies = WinnerCopies(params.gww, size);
+    if (copies > 0) {
+      for (int slot = 0; slot < size; ++slot) fitness[slot] = next[slot].f;
+      const std::vector<int> order = RankSlots(fitness.data(), size);
+      pool.Run(copies, [&](int i, int) { next[order[size - 1 - i]] = next[order[i]]; });
+    }
 
     if (params.k >= 2 && params.perturbation > 0.0) {
       pool.Run(size, [&](int slot, int) {

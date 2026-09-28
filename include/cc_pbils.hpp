@@ -4,12 +4,14 @@
 //   для каждого слота популяции:
 //     турнирная селекция из текущей популяции
 //     локальный поиск до локального оптимума  -> кандидат в рекорд
-//     случайное возмущение этого оптимума      -> член следующей популяции
+//   GWW (go with the winners, нет в бейзлайне): худшая доля gww оптимумов заменяется копиями лучших
+//   для каждого слота: случайное возмущение   -> член следующей популяции
 //   останов — когда рекорд не улучшался early_stop итераций подряд
 //
 // Начальная популяция случайна и, как в бейзлайне, сразу локальным поиском не оптимизируется. Слоты внутри итерации
 // независимы: каждый читает общую популяцию и пишет только свою ячейку следующей. На GPU слот получает блок, на CPU —
-// поток из пула; у каждого слота свой поток ГПСЧ, поэтому ответ от числа потоков не зависит.
+// поток из пула; у каждого слота свой поток ГПСЧ, поэтому ответ от числа потоков не зависит. По той же причине копии
+// победителя после GWW расходятся: возмущение у каждого слота своё.
 #pragma once
 
 #include <chrono>
@@ -38,6 +40,7 @@ struct PbilsParams {
   int iterations = 100;
   int early_stop = 6;
   double perturbation = 0.4;  // вероятность перемаркировки вершины
+  double gww = 0.1;           // доля популяции, заменяемая копиями лучших; 0 — PBILS бейзлайна
   int threads = 1;            // только CPU: сколько особей популяции считать сразу
   uint64_t seed = 1;
   double time_limit_sec = 0.0;  // 0 отключает лимит
@@ -68,7 +71,7 @@ class Progress {
     result.local_searches += params_.population;
     stall_ = improved ? 0 : stall_ + 1;
     if (params_.verbose) {
-      std::printf("  iter %3d  record %lld  stall %d  %.2fs\n", result.iterations_done, result.objective, stall_,
+      std::printf("  iter %3d  record %lld  stall %d  %.3fs\n", result.iterations_done, result.objective, stall_,
                   Seconds());
     }
     return stall_ >= params_.early_stop || (params_.time_limit_sec > 0.0 && Seconds() >= params_.time_limit_sec);
@@ -117,6 +120,19 @@ void Perturb(const Graph& graph, State& state, double probability, uint64_t seed
 
 // Число рабочих потоков: params.threads <= 0 — по числу ядер, и больше одного потока на особь не нужно.
 int ResolveThreads(const PbilsParams& params);
+
+// GWW заменяет не больше половины популяции: тогда образцы и копии не пересекаются, и копировать можно на месте.
+constexpr double kMaxGwwShare = 0.5;
+
+// Сколько худших особей GWW заменяет копиями лучших: целая часть gww * population.
+int WinnerCopies(double gww, int population);
+
+// Слоты от лучшего f к худшему, при равных f — по номеру слота: порядок не зависит от числа потоков, и оба бэкенда
+// получают один и тот же. GWW копирует слот order[i] в order[population - 1 - i] для i < WinnerCopies.
+std::vector<int> RankSlots(const long long* f, int population);
+
+// Проверки параметров, общие для обоих бэкендов.
+void CheckParams(const PbilsParams& params);
 
 PbilsResult SolveCpu(const Graph& graph, const PbilsParams& params);
 

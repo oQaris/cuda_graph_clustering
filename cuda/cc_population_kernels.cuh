@@ -1,4 +1,4 @@
-// Ядра над популяцией целиком: начальные метки, пересчёт G, селекция и возмущение.
+// Ядра над популяцией целиком: начальные метки, пересчёт G, селекция, GWW и возмущение.
 #pragma once
 
 #include "cc_gpu_common.cuh"
@@ -147,6 +147,20 @@ __global__ void KernelSelect(int n, int k, int population, int tournament, const
   for (int v = tid; v < n; v += kBlockSize) out_labels[(size_t)slot * n + v] = labels[(size_t)source * n + v];
   for (int i = tid; i < k * n; i += kBlockSize) out_g[(size_t)slot * k * n + i] = g[(size_t)source * k * n + i];
   for (int c = tid; c < k; c += kBlockSize) out_sizes[(size_t)slot * k + c] = sizes[(size_t)source * k + c];
+}
+
+// GWW, блок на копию: худший слот order[population - 1 - i] получает решение лучшего order[i] целиком, вместе с G и f,
+// потому что возмущения после копии может и не быть. Образцы и копии не пересекаются (kMaxGwwShare), копия — на месте.
+template <typename GainT>
+__global__ void KernelCopyWinners(int n, int k, int population, const int* __restrict__ order, int* labels, GainT* g,
+                                  int* sizes, long long* f) {
+  const int from = order[blockIdx.x];
+  const int to = order[population - 1 - blockIdx.x];
+  const int tid = threadIdx.x;
+  if (tid == 0) f[to] = f[from];
+  for (int v = tid; v < n; v += kBlockSize) labels[(size_t)to * n + v] = labels[(size_t)from * n + v];
+  for (int i = tid; i < k * n; i += kBlockSize) g[(size_t)to * k * n + i] = g[(size_t)from * k * n + i];
+  for (int c = tid; c < k; c += kBlockSize) sizes[(size_t)to * k + c] = sizes[(size_t)from * k + c];
 }
 
 }  // namespace cc::gpu

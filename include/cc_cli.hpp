@@ -139,6 +139,7 @@ inline std::vector<Section> Flags(Options& o) {
            Option("--iters", "I", "предел числа итераций", p.iterations),
            Option("--early-stop", "E", "остановиться после E итераций без рекорда", p.early_stop),
            Option("--perturb", "Q", "вероятность перемаркировки вершины", p.perturbation),
+           Option("--gww", "R", "GWW: доля худших особей, которую заменяют копии лучших, до 0.5; 0 отключает", p.gww),
            Option("--seed", "S", "сид поиска", p.seed),
            Option("--threads", "T", "только CPU: сколько особей популяции считать сразу, 0 - по числу ядер", p.threads),
            Option("--time-limit", "T", "лимит времени в секундах, 0 отключает", p.time_limit_sec),
@@ -241,6 +242,7 @@ inline void WriteResultJson(const std::string& path, const Graph& graph, const O
   out << "  \"density\": " << graph.Density() << ",\n";
   out << "  \"k\": " << options.params.k << ",\n";
   out << "  \"population\": " << options.params.population << ",\n";
+  out << "  \"gww\": " << options.params.gww << ",\n";
   // Число потоков — часть условий замера.
   if (!std::strcmp(backend, "cpu")) out << "  \"threads\": " << ResolveThreads(options.params) << ",\n";
   out << "  \"runs\": " << options.runs << ",\n";
@@ -280,8 +282,8 @@ inline int Main(int argc, char** argv, const char* backend, SolverFn solve) {
   std::printf("backend      %s\n", backend);
   std::printf("instance     n=%u  edges=%llu  density=%.4f\n", graph.Size(), (unsigned long long)graph.EdgeCount(),
               graph.Density());
-  std::printf("algorithm    PBILS  k=%d  pop=%d  tournament=%d  iters=%d  early-stop=%d  perturb=%.2f\n", p.k,
-              p.population, p.tournament, p.iterations, p.early_stop, p.perturbation);
+  std::printf("algorithm    PBILS  k=%d  pop=%d  tournament=%d  iters=%d  early-stop=%d  perturb=%.2f  gww=%.2f\n", p.k,
+              p.population, p.tournament, p.iterations, p.early_stop, p.perturbation, p.gww);
   // Реально используемое число потоков: --threads 0 — по числу ядер, и больше потока на особь не берётся.
   if (!std::strcmp(backend, "cpu")) std::printf("threads      %d\n", ResolveThreads(p));
 
