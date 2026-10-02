@@ -38,7 +38,7 @@ $(BIN)/cc_verify: $(CPU_SOURCES) src/cc_verify.cpp include/*.hpp | $(BIN)
 
 gpu: $(BIN)/cc_gpu
 
-$(BIN)/cc_gpu: $(CPU_SOURCES) cuda/cc_pbils_gpu.cu cuda/main_gpu.cu include/*.hpp | $(BIN)
+$(BIN)/cc_gpu: $(CPU_SOURCES) cuda/cc_pbils_gpu.cu cuda/main_gpu.cu cuda/*.cuh include/*.hpp | $(BIN)
 	$(NVCC) $(NVCCFLAGS) -o $@ cuda/cc_pbils_gpu.cu cuda/main_gpu.cu $(CPU_SOURCES)
 
 test: $(BIN)/cc_verify

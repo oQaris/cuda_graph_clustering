@@ -1,0 +1,5 @@
+# Стиль проекта: Google с длиной строки 120. Короткие строки комментариев clang-format не склеивает — это вручную.
+BasedOnStyle: Google
+ColumnLimit: 120
+SortIncludes: Never
+AllowShortCaseLabelsOnASingleLine: true

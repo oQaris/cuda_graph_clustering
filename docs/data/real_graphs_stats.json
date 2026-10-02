@@ -1,0 +1,261 @@
+{
+ "karate": {
+  "n": 34,
+  "m": 78,
+  "density": 0.13903743315508021,
+  "avg_degree": 4.588235294117647,
+  "bits_gib": 2.5331974029541016e-07,
+  "twin_share": 0.0,
+  "twin_max": 1,
+  "groups_club": 2
+ },
+ "dolphins": {
+  "n": 62,
+  "m": 159,
+  "density": 0.08408249603384453,
+  "avg_degree": 5.129032258064516,
+  "bits_gib": 4.6193599700927734e-07,
+  "twin_share": 0.0,
+  "twin_max": 1
+ },
+ "football": {
+  "n": 115,
+  "m": 613,
+  "density": 0.0935163996948894,
+  "avg_degree": 10.660869565217391,
+  "bits_gib": 1.7136335372924805e-06,
+  "twin_share": 0.0,
+  "twin_max": 1,
+  "groups_conference": 12
+ },
+ "polbooks": {
+  "n": 105,
+  "m": 441,
+  "density": 0.08076923076923077,
+  "avg_degree": 8.4,
+  "bits_gib": 1.564621925354004e-06,
+  "twin_share": 0.0,
+  "twin_max": 1,
+  "groups_leaning": 3
+ },
+ "polblogs": {
+  "n": 1222,
+  "m": 16714,
+  "density": 0.022403894744320276,
+  "avg_degree": 27.355155482815057,
+  "bits_gib": 0.0001775398850440979,
+  "twin_share": 0.0016,
+  "twin_max": 2,
+  "groups_leaning": 2
+ },
+ "email-Eu-core": {
+  "n": 1005,
+  "m": 16064,
+  "density": 0.031840796019900496,
+  "avg_degree": 31.9681592039801,
+  "bits_gib": 0.00011980533599853516,
+  "twin_share": 0.002,
+  "twin_max": 2,
+  "groups_department": 42
+ },
+ "sp_primary_school": {
+  "n": 242,
+  "m": 8181,
+  "density": 0.2805459346387298,
+  "avg_degree": 67.61157024793388,
+  "bits_gib": 7.212162017822266e-06,
+  "twin_share": 0.0,
+  "twin_max": 1,
+  "groups_class": 11
+ },
+ "sp_high_school": {
+  "n": 329,
+  "m": 5613,
+  "density": 0.10402920898509897,
+  "avg_degree": 34.121580547112465,
+  "bits_gib": 1.3481825590133667e-05,
+  "twin_share": 0.0,
+  "twin_max": 1,
+  "groups_class": 9
+ },
+ "cora": {
+  "n": 2708,
+  "m": 5278,
+  "density": 0.0014399999126942077,
+  "avg_degree": 3.8980797636632203,
+  "bits_gib": 0.0008574873208999634,
+  "twin_share": 0.0842,
+  "twin_max": 4,
+  "groups_class": 7
+ },
+ "citeseer": {
+  "n": 3312,
+  "m": 4536,
+  "density": 0.0008272819192940528,
+  "avg_degree": 2.739130434782609,
+  "bits_gib": 0.0012831687927246094,
+  "twin_share": 0.1999,
+  "twin_max": 4,
+  "groups_class": 6
+ },
+ "amazon_photo": {
+  "n": 7650,
+  "m": 119081,
+  "density": 0.004070112116838717,
+  "avg_degree": 31.132287581699348,
+  "bits_gib": 0.006839632987976074,
+  "twin_share": 0.0103,
+  "twin_max": 5,
+  "groups_class": 8
+ },
+ "lastfm_asia": {
+  "n": 7624,
+  "m": 27806,
+  "density": 0.0009568849118596328,
+  "avg_degree": 7.2943336831059815,
+  "bits_gib": 0.006787985563278198,
+  "twin_share": 0.0077,
+  "twin_max": 3,
+  "groups_country": 18
+ },
+ "amazon_computers": {
+  "n": 13752,
+  "m": 245861,
+  "density": 0.0026002762758509414,
+  "avg_degree": 35.7563990692263,
+  "bits_gib": 0.022028982639312744,
+  "twin_share": 0.0076,
+  "twin_max": 4,
+  "groups_class": 10
+ },
+ "coauthor_cs": {
+  "n": 18333,
+  "m": 81894,
+  "density": 0.00048734744416454727,
+  "avg_degree": 8.93405334642448,
+  "bits_gib": 0.0391334630548954,
+  "twin_share": 0.0309,
+  "twin_max": 5,
+  "groups_class": 15
+ },
+ "pubmed": {
+  "n": 19717,
+  "m": 44324,
+  "density": 0.00022803908825811382,
+  "avg_degree": 4.496018664096972,
+  "bits_gib": 0.045319605618715286,
+  "twin_share": 0.0006,
+  "twin_max": 2,
+  "groups_class": 3
+ },
+ "cora_full": {
+  "n": 19793,
+  "m": 63421,
+  "density": 0.0003237887642353002,
+  "avg_degree": 6.408427221745061,
+  "bits_gib": 0.045641761273145676,
+  "twin_share": 0.0446,
+  "twin_max": 4,
+  "groups_class": 70
+ },
+ "deezer_europe": {
+  "n": 28281,
+  "m": 92752,
+  "density": 0.00023194184729358083,
+  "avg_degree": 6.559315441462466,
+  "bits_gib": 0.09313376247882843,
+  "twin_share": 0.0167,
+  "twin_max": 4,
+  "groups_gender": 2
+ },
+ "coauthor_physics": {
+  "n": 34493,
+  "m": 247962,
+  "density": 0.0004168365381774087,
+  "avg_degree": 14.37752587481518,
+  "bits_gib": 0.13851916044950485,
+  "twin_share": 0.0397,
+  "twin_max": 6,
+  "groups_class": 5
+ },
+ "github": {
+  "n": 37700,
+  "m": 289003,
+  "density": 0.0004066878203117068,
+  "avg_degree": 15.331724137931035,
+  "bits_gib": 0.1655828207731247,
+  "twin_share": 0.0014,
+  "twin_max": 3,
+  "groups_developer": 2
+ },
+ "ogbn_arxiv": {
+  "n": 169343,
+  "m": 1157799,
+  "density": 8.074789913670332e-05,
+  "avg_degree": 13.674010735607613,
+  "bits_gib": 3.338467910885811,
+  "twin_share": 0.0093,
+  "twin_max": 4,
+  "groups_subject": 40
+ },
+ "gplus": {
+  "n": 107614,
+  "m": 12238285,
+  "density": 0.0021135719919897085,
+  "avg_degree": 227.44782277398852,
+  "bits_gib": 1.3482044711709023
+ },
+ "twitch_gamers": {
+  "n": 168114,
+  "m": 6797557,
+  "density": 0.00048103610439398153,
+  "avg_degree": 80.86842261798542,
+  "bits_gib": 3.29044072329998,
+  "groups_language": 21,
+  "groups_mature": 2,
+  "groups_affiliate": 2
+ },
+ "loc_gowalla": {
+  "n": 196591,
+  "m": 950327,
+  "density": 4.917880929251338e-05,
+  "avg_degree": 9.668062118815206,
+  "bits_gib": 4.499610900878906
+ },
+ "amazon0302": {
+  "n": 262111,
+  "m": 899792,
+  "density": 2.6194088195261075e-05,
+  "avg_degree": 6.86573245685988,
+  "bits_gib": 7.998016480356455
+ },
+ "email_euall": {
+  "n": 265214,
+  "m": 364481,
+  "density": 1.0363671432711432e-05,
+  "avg_degree": 2.748580391683697,
+  "bits_gib": 8.188536882400513
+ },
+ "web_stanford": {
+  "n": 281903,
+  "m": 1992636,
+  "density": 5.014875010127824e-05,
+  "avg_degree": 14.13703295105054,
+  "bits_gib": 9.252002201974392
+ },
+ "com_dblp": {
+  "n": 317080,
+  "m": 1049866,
+  "density": 2.08846661642591e-05,
+  "avg_degree": 6.622089062697111,
+  "bits_gib": 11.704659909009933
+ },
+ "reddit": {
+  "n": 232965,
+  "m": 57307946,
+  "density": 0.0021118610741919248,
+  "avg_degree": 491.9876032880476,
+  "bits_gib": 6.31890507414937,
+  "groups_subreddit": 41
+ }
+}

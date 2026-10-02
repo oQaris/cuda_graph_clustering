@@ -1,7 +1,7 @@
 #!/bin/bash
 # GPU (--ls-kernel global) против cc_cpu --threads 16 на одной траектории: ровно 20 итераций.
 # У GPU четыре прогона (сиды 5..8), первый отбрасывается из-за создания контекста CUDA; CPU идёт с
-# сидами 6..8, поэтому f обязаны совпасть построчно.
+# сидами 6..8, поэтому f обязаны совпасть построчно. GWW выключен: данные сняты до его появления.
 # Готовые точки пропускаются, так что прерванный прогон можно просто запустить снова.
 cd "$(dirname "$0")/.."
 OUT=docs/data/gpu.csv
@@ -10,7 +10,7 @@ runs() { awk '/^run /{sub("f=","",$3); sub("s$","",$6); print $2","$3","$6}'; }
 point() {  # series n k pop
   [ "$(grep -c "^$1,$2,$3,$4," $OUT)" = 3 ] && return
   sed -i "/^$1,$2,$3,$4,/d" $OUT
-  local c="--n $2 --density 0.33 --graph-seed 7 --k $3 --pop $4 --iters 20 --early-stop 1000 --no-verify"
+  local c="--n $2 --density 0.33 --graph-seed 7 --k $3 --pop $4 --iters 20 --early-stop 1000 --gww 0 --no-verify"
   local g=$(./bin/cc_gpu $c --seed 5 --runs 4 --ls-kernel global | runs | awk -F, '$1>0')
   local p=$(./bin/cc_cpu $c --seed 6 --runs 3 --threads 16 | runs | awk -F, '{print $1+1","$2","$3}')
   join -t, <(echo "$g") <(echo "$p") | awk -F, -v q="$1,$2,$3,$4" '{print q","$1","$2","$3","$4","$5}' >> $OUT
