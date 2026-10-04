@@ -10,6 +10,17 @@ namespace cc::gpu {
 
 using tuning::kBlockSize;
 
+// Разбиения по окрестностям последовательных вершин: блок b отвечает за first + b. Собственную вершину включаем
+// в кластер 0 явно, потому что диагональ матрицы смежности нулевая.
+__global__ void KernelNeighborhoodLabels(const uint32_t* bits, int words, int n, int first, int* all_labels) {
+  const int v = first + blockIdx.x;
+  const uint32_t* row = bits + (size_t)v * words;
+  int* labels = all_labels + (size_t)blockIdx.x * n;
+  for (int u = threadIdx.x; u < n; u += blockDim.x) {
+    labels[u] = (u == v || ((row[u / kWordBits] >> (u % kWordBits)) & 1u)) ? 0 : 1;
+  }
+}
+
 // Поэлементные ядра проходят все population * n меток. Index — int на узком пути и long long на широком, где меток
 // может быть больше 2^31.
 template <typename Index>

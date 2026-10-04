@@ -17,6 +17,16 @@
 namespace cc {
 namespace cli {
 
+enum Algorithm { kPbils, kNeighborhood, kNeighborhoodWithManyLocalSearches };
+
+inline const char* AlgorithmName(int algorithm) {
+  switch (algorithm) {
+    case kNeighborhood: return "NeighborhoodCuda";
+    case kNeighborhoodWithManyLocalSearches: return "NeighborhoodWithManyLocalSearchesCuda";
+    default: return "PBILS";
+  }
+}
+
 struct Options {
   // инстанс
   unsigned n = 500;
@@ -32,6 +42,7 @@ struct Options {
   double threshold = 0.5;
   // алгоритм
   PbilsParams params;
+  int algorithm = kPbils;
   // эксперимент
   int runs = 1;
   bool verify = true;
@@ -133,8 +144,15 @@ inline std::vector<Section> Flags(Options& o) {
        }},
       {"алгоритм",
        {
+           Choice("--algorithm", "NAME",
+                  "pbils, NeighborhoodCuda или NeighborhoodWithManyLocalSearchesCuda;\n"
+                  "Neighborhood: только GPU, k = 2, полный перебор без лимита времени",
+                  o.algorithm,
+                  {{"pbils", kPbils},
+                   {"NeighborhoodCuda", kNeighborhood},
+                   {"NeighborhoodWithManyLocalSearchesCuda", kNeighborhoodWithManyLocalSearches}}),
            Option("--k", "K", "верхняя граница числа кластеров", p.k),
-           Option("--pop", "P", "размер популяции", p.population),
+           Option("--pop", "P", "размер популяции; для Neighborhood — разбиений в пакете", p.population),
            Option("--tournament", "T", "размер турнира", p.tournament),
            Option("--iters", "I", "предел числа итераций", p.iterations),
            Option("--early-stop", "E", "остановиться после E итераций без рекорда", p.early_stop),
@@ -236,6 +254,7 @@ inline void WriteResultJson(const std::string& path, const Graph& graph, const O
     return;
   }
   out << "{\n";
+  out << "  \"algorithm\": \"" << AlgorithmName(options.algorithm) << "\",\n";
   out << "  \"backend\": \"" << backend << "\",\n";
   out << "  \"size\": " << graph.Size() << ",\n";
   out << "  \"edges\": " << graph.EdgeCount() << ",\n";
@@ -263,9 +282,16 @@ using SolverFn = PbilsResult (*)(const Graph&, const PbilsParams&);
 // минутами, и его заменяет ObjectiveBitwise.
 constexpr unsigned kPairwiseVerifyLimit = 32767;
 
-inline int Main(int argc, char** argv, const char* backend, SolverFn solve) {
+inline int Main(int argc, char** argv, const char* backend, SolverFn solve, SolverFn neighborhood = nullptr,
+                SolverFn many_local_searches = nullptr) {
   Options options;
   if (!Parse(argc, argv, options)) return 1;
+  if (options.algorithm == kNeighborhood) solve = neighborhood;
+  if (options.algorithm == kNeighborhoodWithManyLocalSearches) solve = many_local_searches;
+  if (solve == nullptr) {
+    std::printf("error: %s is only available in cc_gpu\n", AlgorithmName(options.algorithm));
+    return 1;
+  }
 
   Graph graph;
   try {
@@ -282,8 +308,12 @@ inline int Main(int argc, char** argv, const char* backend, SolverFn solve) {
   std::printf("backend      %s\n", backend);
   std::printf("instance     n=%u  edges=%llu  density=%.4f\n", graph.Size(), (unsigned long long)graph.EdgeCount(),
               graph.Density());
-  std::printf("algorithm    PBILS  k=%d  pop=%d  tournament=%d  iters=%d  early-stop=%d  perturb=%.2f  gww=%.2f\n", p.k,
-              p.population, p.tournament, p.iterations, p.early_stop, p.perturbation, p.gww);
+  if (options.algorithm == kPbils) {
+    std::printf("algorithm    PBILS  k=%d  pop=%d  tournament=%d  iters=%d  early-stop=%d  perturb=%.2f  gww=%.2f\n",
+                p.k, p.population, p.tournament, p.iterations, p.early_stop, p.perturbation, p.gww);
+  } else {
+    std::printf("algorithm    %s  k=%d  batch=%d\n", AlgorithmName(options.algorithm), p.k, p.population);
+  }
   // Реально используемое число потоков: --threads 0 — по числу ядер, и больше потока на особь не берётся.
   if (!std::strcmp(backend, "cpu")) std::printf("threads      %d\n", ResolveThreads(p));
 
