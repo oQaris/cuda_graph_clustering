@@ -1,4 +1,5 @@
 // PBILS на CUDA: блок на особь, так что блоки между собой не синхронизируются, а параллелизм даёт сама популяция.
+// Здесь также перебор окрестностей Neighborhood; оба алгоритма используют общие пересчёт G и спуск.
 // Здесь выбор ядер, память и цикл итераций; ядра — в cc_*.cuh, параметры запуска — в cc_gpu_tuning.cuh.
 //
 // До 32 767 вершин G 16-битная (узкий путь). На большем графе решатель идёт широким путём: G 32-битная, а при k = 2
@@ -148,6 +149,7 @@ struct Run {
   int population = 0;
   int copies = 0;  // сколько худших особей GWW заменяет копиями лучших
   long long edges = 0;
+  bool has_next = true;  // Neighborhood не нужна вторая популяция для селекции
   Plan plan;
   DeviceMemory memory;
   uint32_t* bits = nullptr;
@@ -173,6 +175,7 @@ struct Run {
     f(next_individual, 1);
     f(order, copies > 0 ? (size_t)population : 0);
     for (Population<GainT>* p : {&pop, &next}) {
+      if (p == &next && !has_next) continue;
       f(p->labels, labels);
       f(p->g, labels * pop.k);
       f(p->sizes, (size_t)population * pop.k);
@@ -180,10 +183,11 @@ struct Run {
     }
   }
 
-  Run(const Graph& graph, const PbilsParams& params)
+  Run(const Graph& graph, const PbilsParams& params, bool allocate_next = true)
       : words((int)graph.WordsPerRow()),
         population(params.population),
-        copies(WinnerCopies(params.gww, params.population)) {
+        copies(WinnerCopies(params.gww, params.population)),
+        has_next(allocate_next) {
     const Device device = Device::Current();
     const int n = (int)graph.Size();
     edges = (long long)graph.EdgeCount();
@@ -382,6 +386,55 @@ PbilsResult Solve(const Graph& graph, const PbilsParams& params) {
   return result;
 }
 
+// Полный перебор окрестностей пакетами: память состояния O(population * n), а не O(n²). Порядок вершин и строгое
+// сравнение в PullRecord сохраняют выбор меньшей вершины при равных f, в том числе между пакетами.
+template <typename GainT>
+PbilsResult SolveNeighborhood(const Graph& graph, const PbilsParams& params, bool local_search) {
+  Progress progress(params);
+  PbilsParams batch = params;
+  const int n = (int)graph.Size();
+  batch.population = std::min(params.population, n);
+  batch.gww = 0.0;
+  Run<GainT> run(graph, batch, false);
+  const int capacity = batch.population;
+  PbilsResult result;
+  std::vector<long long> host_f;
+  for (int first = 0; first < n; first += capacity) {
+    run.population = std::min(capacity, n - first);
+    run.plan.blocks = std::min(run.plan.blocks, run.population);
+    host_f.resize(run.population);
+    KernelNeighborhoodLabels<<<run.population, tuning::kBlockSize>>>(run.bits, run.words, n, first, run.pop.labels);
+    CheckLaunch();
+    Rebuild(run);
+    if (local_search) {
+      Descend(run);
+      result.local_searches += run.population;
+    }
+    PullRecord(run, host_f, result);
+    if (params.verbose) {
+      std::printf("  neighborhoods %d/%d  record %lld  %.3fs\n", first + run.population, n, result.objective,
+                  progress.Seconds());
+    }
+  }
+  unsigned long long moves = 0;
+  CC_CUDA_CHECK(cudaMemcpy(&moves, run.moves, sizeof(moves), cudaMemcpyDeviceToHost));
+  result.accepted_moves = (long long)moves;
+  result.clusters_used = CountClustersUsed(result.labels, 2);
+  result.seconds = progress.Seconds();
+  return result;
+}
+
+PbilsResult Neighborhood(const Graph& graph, const PbilsParams& params, bool local_search) {
+  if (params.k != 2) throw std::runtime_error("Neighborhood algorithms require k = 2");
+  if (params.population < 1) throw std::runtime_error("population must be >= 1");
+  if (graph.Size() == 0 || graph.Size() > kMaxVerticesWide) {
+    throw std::runtime_error("Neighborhood requires 1 <= n <= " + std::to_string(kMaxVerticesWide));
+  }
+  const bool wide = graph.Size() > kMaxVerticesNarrow || params.ls_kernel == PbilsParams::kLocalSearchWide;
+  return wide ? SolveNeighborhood<WideGain>(graph, params, local_search)
+              : SolveNeighborhood<Gain>(graph, params, local_search);
+}
+
 }  // namespace
 }  // namespace gpu
 
@@ -398,6 +451,14 @@ PbilsResult SolveGpu(const Graph& graph, const PbilsParams& params) {
   // --ls-kernel wide включает широкий путь и на малом графе, чтобы оба пути можно было сравнить на одном инстансе.
   const bool wide = n > gpu::kMaxVerticesNarrow || params.ls_kernel == PbilsParams::kLocalSearchWide;
   return wide ? gpu::Solve<gpu::WideGain>(graph, params) : gpu::Solve<gpu::Gain>(graph, params);
+}
+
+PbilsResult SolveNeighborhoodGpu(const Graph& graph, const PbilsParams& params) {
+  return gpu::Neighborhood(graph, params, false);
+}
+
+PbilsResult SolveNeighborhoodWithManyLocalSearchesGpu(const Graph& graph, const PbilsParams& params) {
+  return gpu::Neighborhood(graph, params, true);
 }
 
 }  // namespace cc

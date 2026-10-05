@@ -17,7 +17,7 @@ HAVE_NVCC := $(shell command -v $(NVCC) 2>/dev/null)
 
 CPU_SOURCES := src/cc_graph.cpp src/cc_pbils_cpu.cpp
 
-.PHONY: all cpu gpu test clean
+.PHONY: all cpu gpu test test-gpu clean
 ifeq ($(HAVE_NVCC),)
 all: cpu
 	@echo "note: nvcc not found, GPU target skipped (run 'make gpu' on a CUDA host)"
@@ -40,6 +40,12 @@ gpu: $(BIN)/cc_gpu
 
 $(BIN)/cc_gpu: $(CPU_SOURCES) cuda/cc_pbils_gpu.cu cuda/main_gpu.cu cuda/*.cuh include/*.hpp | $(BIN)
 	$(NVCC) $(NVCCFLAGS) -o $@ cuda/cc_pbils_gpu.cu cuda/main_gpu.cu $(CPU_SOURCES)
+
+$(BIN)/cc_verify_gpu: $(CPU_SOURCES) cuda/cc_pbils_gpu.cu cuda/cc_verify_gpu.cu cuda/*.cuh include/*.hpp | $(BIN)
+	$(NVCC) $(NVCCFLAGS) -o $@ cuda/cc_pbils_gpu.cu cuda/cc_verify_gpu.cu $(CPU_SOURCES)
+
+test-gpu: $(BIN)/cc_verify_gpu
+	./$(BIN)/cc_verify_gpu
 
 test: $(BIN)/cc_verify
 	./$(BIN)/cc_verify
